@@ -1,16 +1,16 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v3.1
--- Fokus: saubere Scoring Stages, kein goto, robuste Deobfuscation, Marker fuer ServiceWorker, WebCrypto, QR Canvas, Split Payload
--- v3.1 Fixes:
---   1) Marker Symbole (sichtbar auch ohne dec_*)
---   2) Split Payload: virtual base64 (aus Variablen/Join) wird als Kandidat fuer Decode genutzt
---   3) Deobfuscation Rueckgabe erweitert (virtuals Tabelle statt Count)
--- Performance: harte Gates, Smart Scan, Budgets, pcall Safety, dur_ms Logging
+-- HTML Smuggling Detection v3.2
+-- Fokus: saubere Scoring Stages, kein goto, pcall Safety
+-- v3.2 Aenderungen:
+-- 1) Einzel Sniffing pro Base64 Kandidat (kein Datenmuell durch Join Decode)
+-- 2) Split Payload Power: Deobfuscate liefert virtuelle Kandidaten als Liste, werden sofort gescannt
+-- 3) Fragment Support: min_frag_len Default = 4 (p += "TVqQ" wird erfasst)
+-- 4) Speed: decode nur auf relevante Kandidaten, harter Stop bei PE
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
 
-local VERSION = "3.1"
+local VERSION = "3.2"
 
 -- =========================
 -- Config lesen
@@ -26,11 +26,9 @@ local LOG_SCORE_THRESHOLD = tonumber(CFG.log_score_threshold) or 5.0
 local LOG_SIMPLE_LINE     = (CFG.log_simple_line == true)
 local SCORE_DEBUG         = (CFG.score_debug == true)
 
--- Extended Logging forcieren (kontrolliert)
 local FORCE_EXTENDED_LOG           = (CFG.force_extended_log == true)
 local FORCE_EXTENDED_LOG_MIN_SCORE = tonumber(CFG.force_extended_log_min_score) or 0.1
 
--- Slow Log
 local SLOW_LOG_MS = tonumber(CFG.slow_log_ms) or 150.0
 
 -- Newsletter Handling
@@ -82,7 +80,7 @@ local LIMITS = {
     deobfus_timeout_ms = 50.0,
   },
   obfus = {
-    min_frag_len = 16,
+    min_frag_len = 4, -- v3.2: Fragment Support
     virtual_trigger_len = 120,
     virtual_max_payloads = 3,
     resolve_passes = 8,
@@ -114,6 +112,8 @@ local W = {
   webworker_api = 0.5,
   serviceworker_api = 0.5,
   webassembly_api = 0.6,
+  webcrypto_api = 0.6,
+  canvas_qr_api = 0.6,
 
   event_handler = 0.3,
   split_payload = 1.0,
@@ -170,12 +170,6 @@ local W = {
   large_uint8array = 3.0,
   css_exfiltration = 2.5,
   polymorphic_obfuscation = 2.0,
-
-  -- v3.1 Sichtbarkeits Marker (auch ohne dec_*)
-  marker_serviceworker = 0.6,
-  marker_webcrypto     = 0.6,
-  marker_qr_canvas     = 0.6,
-  marker_split_strong  = 0.8,
 }
 
 local function merge_numbers(dst, src)
@@ -336,7 +330,7 @@ local function table_keys_sorted(t)
 end
 
 local function normalize_b64(s)
-  local t = s:gsub("%s+", "")
+  local t = (s or ""):gsub("%s+", "")
   t = t:gsub("%-", "+"):gsub("_", "/")
   local mod = #t % 4
   if mod == 2 then t = t .. "=="
@@ -347,7 +341,7 @@ end
 
 local function is_frag_base64ish(s)
   if not s then return false end
-  if #s < (LOBFUS.min_frag_len or 16) then return false end
+  if #s < (LOBFUS.min_frag_len or 4) then return false end
   return s:match("^[A-Za-z0-9%+/_%%-]+=*$") ~= nil
 end
 
@@ -369,7 +363,6 @@ local function safe_decode_base64(task, b64, limit)
   return res
 end
 
--- Smart Scan fuer grosse Texte
 local function smart_text_scan(s, chunk)
   if not s then return "" end
   s = tostring(s)
@@ -395,9 +388,7 @@ end
 local function calculate_entropy(s)
   if not s or #s == 0 then return 0 end
   local maxb = tonumber(LOBFUS.max_entropy_check_bytes) or 4096
-  if #s > maxb then
-    s = s:sub(1, maxb)
-  end
+  if #s > maxb then s = s:sub(1, maxb) end
 
   local freq = {}
   for i = 1, #s do
@@ -573,7 +564,7 @@ local function compute_heur_mul(task, NL, NL_reason)
 end
 
 -- =========================
--- Base64 Candidates
+-- Base64 Candidates (mit kleinem Time Budget)
 -- =========================
 local function extract_b64_candidates(text, max_candidates_override)
   local candidates = {}
@@ -612,10 +603,10 @@ local function extract_b64_candidates(text, max_candidates_override)
 end
 
 -- =========================
--- Deobfuscation (v3.1: virtuals werden zurueckgegeben)
+-- Deobfuscation v3.2 (Rueckgabe: clean, virtuals_table, timeout_flag)
 -- =========================
 local function advanced_deobfuscate(script, timeout_ms)
-  if not script or #script < 50 then return script, {}, 0 end
+  if not script or #script < 30 then return script, {}, 0 end
 
   local max_len = tonumber(LSCRIPT.max_script_len) or 80000
   if #script > max_len then
@@ -637,7 +628,7 @@ local function advanced_deobfuscate(script, timeout_ms)
   local var_cnt = 0
   local virtuals = {}
 
-  local function maybe_emit_virtual(val)
+  local function maybe_add_virtual(val)
     if not val then return end
     if #virtuals >= (LOBFUS.virtual_max_payloads or 3) then return end
     if #val >= (LOBFUS.virtual_trigger_len or 120) then
@@ -684,7 +675,7 @@ local function advanced_deobfuscate(script, timeout_ms)
         var_map[name] = ""
       end
       var_map[name] = (var_map[name] or "") .. val
-      maybe_emit_virtual(var_map[name])
+      maybe_add_virtual(var_map[name])
     end
   end
 
@@ -765,19 +756,13 @@ local function advanced_deobfuscate(script, timeout_ms)
         if resolved and resolved ~= var_map[target] then
           if not var_map[target] then var_cnt = var_cnt + 1 end
           var_map[target] = resolved
-          maybe_emit_virtual(resolved)
+          maybe_add_virtual(resolved)
           changed = true
         end
       until true
     end
 
     if not changed then break end
-  end
-
-  if #virtuals > 0 then
-    for i, v in ipairs(virtuals) do
-      clean = clean .. "\n/*__RSPAMD_VIRTUAL_PAYLOAD_B64_" .. tostring(i) .. "__:" .. v .. "*/"
-    end
   end
 
   clean = clean:gsub('["\']%s*%+%s*["\']', "")
@@ -1018,15 +1003,13 @@ local function detect_uint8array_payload(script)
     return score, critical, reasons
   end)
 
-  if not ok then
-    return 0, nil, {}
-  end
+  if not ok then return 0, nil, {} end
   return a, b, c
 end
 
 local function detect_split_payload(html)
-  if not html or #html < 200 then return false end
-  local minf = tonumber(LOBFUS.min_frag_len) or 16
+  if not html or #html < 120 then return false end
+  local minf = tonumber(LOBFUS.min_frag_len) or 4
   local cnt = 0
   local maxv = tonumber(LSCRIPT.max_vars) or 20
   local vars = {}
@@ -1100,10 +1083,22 @@ local function detect_advanced_api_calls(lc, add)
   if lc:find("setinterval%s*%(", 1, false) then add(W.settimeout_api, "setinterval_call", false) end
 
   if lc:find("new%s+worker%s*%(", 1, false) then add(W.webworker_api, "webworker", false) end
-  if lc:find("serviceworker", 1, true) then add(W.serviceworker_api, "serviceworker", false) end
 
-  if lc:find("webassembly", 1, true) then add(W.webassembly_api, "webassembly", false) end
-  if lc:find("wasm", 1, true) then add(W.webassembly_api, "wasm_reference", false) end
+  if lc:find("serviceworker", 1, true) or lc:find("navigator%.serviceworker", 1, false) then
+    add(W.serviceworker_api, "serviceworker_api", false)
+  end
+
+  if lc:find("webassembly", 1, true) or lc:find("wasm", 1, true) then
+    add(W.webassembly_api, "webassembly", false)
+  end
+
+  if lc:find("crypto%.subtle", 1, false) or lc:find("subtle%.decrypt", 1, false) or lc:find("importkey", 1, true) then
+    add(W.webcrypto_api, "webcrypto_api", false)
+  end
+
+  if lc:find("<canvas", 1, true) or lc:find("getcontext%(%s*['\"]2d['\"]", 1, false) or lc:find("qrcanvas", 1, true) then
+    add(W.canvas_qr_api, "qr_canvas_api", false)
+  end
 
   for on_event in lc:gmatch("on%w+%s*=%s*['\"]([^'\"]+)['\"]") do
     if on_event:find("atob", 1, true) or on_event:find("eval", 1, true) then
@@ -1234,9 +1229,7 @@ local function sniff_decoded(bin)
     return "BINARY"
   end)
 
-  if not ok then
-    return "BINARY"
-  end
+  if not ok then return "BINARY" end
   return result
 end
 
@@ -1280,7 +1273,7 @@ local function part_is_htmlish(p)
 end
 
 -- =========================
--- Main Detection v3.1
+-- Main Detection v3.2
 -- =========================
 local function detect_html_smuggling_payload(task)
   if not ENABLED then return end
@@ -1314,8 +1307,6 @@ local function detect_html_smuggling_payload(task)
 
   local b64_big_thr = tonumber(LB64.big_threshold) or 5000
   local b64_huge_thr = tonumber(LB64.huge_threshold) or 20000
-  local decode_mul = tonumber(LDEC.joined_len_mul) or 2
-  local max_joined_decode = (tonumber(LDEC.max_bytes) or (160 * 1024)) * decode_mul
   local min_decode_total = tonumber(LB64.min_decode_total) or 1500
 
   local script_time_budget_ms = tonumber(LSCRIPT.max_script_time_ms) or 80.0
@@ -1356,12 +1347,6 @@ local function detect_html_smuggling_payload(task)
           has_script_tags = (lc:find("<script", 1, true) ~= nil),
           has_js_keywords = (lc:find("function", 1, true) ~= nil) or (lc:find("var ", 1, true) ~= nil) or (lc:find("let ", 1, true) ~= nil) or (lc:find("const ", 1, true) ~= nil),
           has_b64_pattern = (lc:find("[a-z0-9+/]{100,}", 1, false) ~= nil),
-
-          -- v3.1 Marker Klassen
-          has_serviceworker = (lc:find("serviceworker", 1, true) ~= nil),
-          has_webcrypto = (lc:find("crypto.subtle", 1, true) ~= nil) or (lc:find("subtle.encrypt", 1, true) ~= nil) or (lc:find("subtle.decrypt", 1, true) ~= nil),
-          has_canvas = (lc:find("<canvas", 1, true) ~= nil) or (lc:find("getcontext('2d')", 1, true) ~= nil) or (lc:find("getcontext(\"2d\")", 1, true) ~= nil),
-          has_qr = (lc:find("qrcode", 1, true) ~= nil) or (lc:find("qr", 1, true) ~= nil),
         }
 
         if flags.has_atob and lc:find("atob%s*%(", 1, false) then
@@ -1382,27 +1367,6 @@ local function detect_html_smuggling_payload(task)
 
         detect_advanced_api_calls(lc, add)
 
-        -- v3.1 Marker: Service Worker (sichtbar auch ohne dec)
-        if flags.has_serviceworker then
-          add(W.marker_serviceworker or 0.6, "marker_serviceworker", false)
-          task:insert_result("HTML_SMUGGLING_MARKER_SERVICEWORKER", 1.0)
-        end
-
-        -- v3.1 Marker: WebCrypto (sichtbar auch ohne dec)
-        if flags.has_webcrypto then
-          add(W.marker_webcrypto or 0.6, "marker_webcrypto", false)
-          task:insert_result("HTML_SMUGGLING_MARKER_WEBCRYPTO", 1.0)
-        end
-
-        -- v3.1 Marker: QR Canvas Hybrid
-        if flags.has_canvas and flags.has_qr then
-          add(W.marker_qr_canvas or 0.6, "marker_qr_canvas", false)
-          task:insert_result("HTML_SMUGGLING_MARKER_QR_CANVAS", 1.0)
-          if lc:find("data:image", 1, true) or lc:find("--payload", 1, true) then
-            reasons["qr_payload_hint"] = true
-          end
-        end
-
         if flags.has_iframe and lc:find("src%s*=", 1, false) then add(W.iframe_src, "iframe_src", false) end
         if lc:find("src%s*=", 1, false) and flags.has_data_uri then add(W.data_uri, "data_uri", false) end
 
@@ -1421,8 +1385,6 @@ local function detect_html_smuggling_payload(task)
 
         if flags.has_js_keywords and detect_split_payload(html) then
           add(W.split_payload, "split_payload", false)
-          add(W.marker_split_strong or 0.8, "marker_split_payload", false)
-          task:insert_result("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", 1.0)
         end
 
         if lc:find("settimeout", 1, true) or lc:find("setinterval", 1, true) then
@@ -1483,7 +1445,7 @@ local function detect_html_smuggling_payload(task)
             end
 
             repeat
-              if not script or #script < 40 then break end
+              if not script or #script < 20 then break end
 
               local max_script_len = tonumber(LSCRIPT.max_script_len) or 80000
               if #script > max_script_len then
@@ -1521,119 +1483,113 @@ local function detect_html_smuggling_payload(task)
               if not (maybe_b64 or maybe_concat or maybe_obfus) then break end
 
               local sscan = smart_text_scan(script, LSCRIPT.smart_chunk)
-
               local normalized_script = sscan:gsub('"%s*%+%s*"', "")
               normalized_script = normalized_script:gsub("'%s*%+%s*'", "")
 
-              local vlist = nil
+              -- v3.2: Deobfuscate liefert virtuelle Kandidaten als Liste
+              local virtuals = {}
               if maybe_concat or maybe_obfus then
-                local deob, vret, tflag = advanced_deobfuscate(normalized_script, LSCRIPT.deobfus_timeout_ms)
+                local deob, vlist, tflag = advanced_deobfuscate(normalized_script, LSCRIPT.deobfus_timeout_ms)
                 normalized_script = deob
-                vlist = vret
-                if tflag == 1 then
-                  reasons["deobfus_timeout"] = true
-                end
+                virtuals = vlist or {}
+                if tflag == 1 then reasons["deobfus_timeout"] = true end
               end
 
-              if not normalized_script or #normalized_script < (LB64.min_len or 200) then
-                -- wenn Script kurz ist, aber wir haben virtuals, dann trotzdem weiter
-                if not (vlist and type(vlist) == "table" and #vlist > 0) then
-                  break
-                end
-              end
+              if not normalized_script or #normalized_script < 40 then break end
 
               local max_cand_script = (LB64.max_candidates or 6)
               if NL then max_cand_script = math.min(max_cand_script, 4) end
 
               local cands = extract_b64_candidates(normalized_script, max_cand_script)
 
-              -- v3.1: Split Payload virtual base64 als Kandidat dazu nehmen
-              if vlist and type(vlist) == "table" and #vlist > 0 then
-                for _, vb in ipairs(vlist) do
-                  if type(vb) == "string" then
-                    local nb = normalize_b64(vb)
-                    if is_frag_base64ish(nb) then
-                      cands[#cands + 1] = nb
-                    end
+              -- v3.2: virtuelle Kandidaten (Split Payload Power)
+              if virtuals and #virtuals > 0 then
+                for _, v in ipairs(virtuals) do
+                  local vv = (v or ""):gsub("%s+", "")
+                  if is_frag_base64ish(vv) then
+                    cands[#cands + 1] = vv
                   end
                 end
-                reasons["virtual_b64_from_split"] = true
+                reasons["virtual_b64_candidates"] = true
               end
 
-              if #cands == 0 then break end
+              if not cands or #cands == 0 then break end
 
+              -- Gesamtindikatoren bleiben sinnvoll
               local total_b64_len = 0
-              local joined = {}
-              local joined_len = 0
-
               for _, cand in ipairs(cands) do
-                local cleaned = tostring(cand):gsub("%s+", "")
-                total_b64_len = total_b64_len + #cleaned
-
-                if #joined < (LB64.join_max_parts or 5) and joined_len < (LB64.join_max_len or 180000) then
-                  local nb = normalize_b64(cand)
-                  joined_len = joined_len + #nb
-                  joined[#joined + 1] = nb
-                end
+                total_b64_len = total_b64_len + #(tostring(cand):gsub("%s+", ""))
               end
 
               if total_b64_len >= b64_big_thr then add(W.b64_total_len_big, "b64_total_len_big", false) end
               if total_b64_len >= b64_huge_thr then add(W.b64_total_len_huge, "b64_total_len_huge", false) end
-              if #joined > 1 then add(W.b64_joined_parts, "b64_joined_parts", false) end
+              if #cands > 1 then add(W.b64_joined_parts, "b64_joined_parts", false) end
 
+              -- Gate: erst ab genug Material decoden
               if total_b64_len < min_decode_total then break end
-              if joined_len <= 0 or joined_len > max_joined_decode then break end
 
-              local joined_b64 = table.concat(joined, "")
-              local decoded = safe_decode_base64(task, joined_b64, LDEC.max_bytes)
-              if decoded and #decoded > 0 then
-                local kind = sniff_decoded(decoded)
+              -- v3.2: Einzel Sniffing pro Kandidat, Stop bei PE
+              for _, cand in ipairs(cands) do
+                local nb = normalize_b64(cand)
+                if nb and #nb >= 40 then
+                  local decoded = safe_decode_base64(task, nb, LDEC.max_bytes)
+                  if decoded and #decoded > 0 then
+                    local kind = sniff_decoded(decoded)
 
-                if kind == "PE" then
-                  add(W.dec_pe, "dec_pe", true); critical_kind = "PE"
-                elseif kind == "WASM" then
-                  add(W.dec_wasm, "dec_wasm", true); if not critical_kind then critical_kind = "WASM" end
-                elseif kind == "XML" then
-                  if has("ms_appinstaller_uri") or has("appinstaller_file") then
-                    add(W.dec_xml_appinstaller, "dec_xml_appinstaller", true); critical_kind = "XML_APPINSTALLER"
-                  else
-                    add(W.dec_xml, "dec_xml", true)
+                    if kind == "PE" then
+                      add(W.dec_pe, "dec_pe", true); critical_kind = "PE"
+                      reasons["single_sniff_pe"] = true
+                      break
+                    elseif kind == "WASM" then
+                      add(W.dec_wasm, "dec_wasm", true); if not critical_kind then critical_kind = "WASM" end
+                    elseif kind == "XML" then
+                      if has("ms_appinstaller_uri") or has("appinstaller_file") then
+                        add(W.dec_xml_appinstaller, "dec_xml_appinstaller", true); critical_kind = "XML_APPINSTALLER"
+                      else
+                        add(W.dec_xml, "dec_xml", true)
+                      end
+                    elseif kind == "VHDX" then
+                      add(W.dec_vhdx, "dec_vhdx", true); critical_kind = "VHDX"
+                    elseif kind == "ISO" then
+                      add(W.dec_iso, "dec_iso", true); critical_kind = "ISO"
+                    elseif kind == "LNK" then
+                      add(W.dec_lnk, "dec_lnk", true); critical_kind = "LNK"
+                    elseif kind == "OLE" then
+                      add(W.dec_ole, "dec_ole", true); critical_kind = "OLE"
+                    elseif kind == "MSIX" then
+                      add(W.dec_msix, "dec_msix", true); critical_kind = "MSIX"
+                    elseif kind == "APPX" then
+                      add(W.dec_appx, "dec_appx", true); critical_kind = "APPX"
+                    elseif kind == "CAB" then
+                      add(W.dec_cab, "dec_cab", true); critical_kind = "CAB"
+                    elseif kind == "7ZIP" then
+                      add(W.dec_7zip, "dec_7zip", true); critical_kind = "7ZIP"
+                    elseif kind == "RAR" then
+                      add(W.dec_rar, "dec_rar", true); critical_kind = "RAR"
+                    elseif kind == "ZIP" then
+                      add(W.dec_zip, "dec_zip", true); if not critical_kind then critical_kind = "ZIP" end
+                    elseif kind == "PDF" then
+                      add(W.dec_pdf, "dec_pdf", true)
+                    elseif kind == "VBS" or kind == "PS1" or kind == "BAT" then
+                      add(W.dec_script, "dec_script", true); critical_kind = "SCRIPT"
+                    elseif kind == "JS" then
+                      add(W.dec_js, "dec_js", true)
+                    elseif kind == "HTML" then
+                      add(W.dec_html, "dec_html", true)
+                    else
+                      add(W.dec_bin, "dec_bin", true)
+                    end
                   end
-                elseif kind == "VHDX" then
-                  add(W.dec_vhdx, "dec_vhdx", true); critical_kind = "VHDX"
-                elseif kind == "ISO" then
-                  add(W.dec_iso, "dec_iso", true); critical_kind = "ISO"
-                elseif kind == "LNK" then
-                  add(W.dec_lnk, "dec_lnk", true); critical_kind = "LNK"
-                elseif kind == "OLE" then
-                  add(W.dec_ole, "dec_ole", true); critical_kind = "OLE"
-                elseif kind == "MSIX" then
-                  add(W.dec_msix, "dec_msix", true); critical_kind = "MSIX"
-                elseif kind == "APPX" then
-                  add(W.dec_appx, "dec_appx", true); critical_kind = "APPX"
-                elseif kind == "CAB" then
-                  add(W.dec_cab, "dec_cab", true); critical_kind = "CAB"
-                elseif kind == "7ZIP" then
-                  add(W.dec_7zip, "dec_7zip", true); critical_kind = "7ZIP"
-                elseif kind == "RAR" then
-                  add(W.dec_rar, "dec_rar", true); critical_kind = "RAR"
-                elseif kind == "ZIP" then
-                  add(W.dec_zip, "dec_zip", true); if not critical_kind then critical_kind = "ZIP" end
-                elseif kind == "PDF" then
-                  add(W.dec_pdf, "dec_pdf", true)
-                elseif kind == "VBS" or kind == "PS1" or kind == "BAT" then
-                  add(W.dec_script, "dec_script", true); critical_kind = "SCRIPT"
-                elseif kind == "JS" then
-                  add(W.dec_js, "dec_js", true)
-                elseif kind == "HTML" then
-                  add(W.dec_html, "dec_html", true)
-                else
-                  add(W.dec_bin, "dec_bin", true)
                 end
+              end
+
+              if critical_kind == "PE" then
+                break
               end
             until true
 
             if scripts_checked >= (LSCRIPT.max_check or 3) then break end
+            if critical_kind == "PE" then break end
           end
         end
       end
@@ -1691,10 +1647,8 @@ local function detect_html_smuggling_payload(task)
     combo_hard = combo_hard + 2.0
   end
 
-  -- Stage 1: raw
   local raw_score = score
 
-  -- Stage 2: combos
   if combo_soft > 0 then
     score = score + (combo_soft * heur_mul)
     reasons["combo_soft"] = true
@@ -1705,21 +1659,18 @@ local function detect_html_smuggling_payload(task)
   end
   local after_combos = score
 
-  -- Stage 3: critical boost
   if critical_kind and CRITICAL_BOOST > 0 then
     score = score + CRITICAL_BOOST
     reasons["critical_boost"] = true
   end
   local after_boost = score
 
-  -- Stage 4: min score floor
   if score > 0 and MIN_SCORE > 0 and score < MIN_SCORE then
     score = MIN_SCORE
     reasons["min_score"] = true
   end
   local after_floor = score
 
-  -- Stage 5: auth mul
   local auth_mul = 1.0
   if AUTH_MUL_ENABLED then
     if task:get_symbol("R_DKIM_ALLOW") then auth_mul = auth_mul * 0.7 end
@@ -1732,8 +1683,21 @@ local function detect_html_smuggling_payload(task)
   local final_score = score
 
   -- =========================
-  -- Marker (kritisch)
+  -- Marker
   -- =========================
+  if reasons["serviceworker_api"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_SERVICEWORKER", 1.0)
+  end
+  if reasons["webcrypto_api"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_WEBCRYPTO", 1.0)
+  end
+  if reasons["qr_canvas_api"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_QR_CANVAS", 1.0)
+  end
+  if reasons["split_payload"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", 1.0)
+  end
+
   if critical_kind == "PE" then
     task:insert_result("HTML_SMUGGLING_CRITICAL_PE", 1.0)
   elseif critical_kind == "WASM" then
@@ -1826,10 +1790,9 @@ local function detect_html_smuggling_payload(task)
 
     if dur_ms >= SLOW_LOG_MS then
       rspamd_logger.infox(task, string.format(
-        "HTML_SMUGGLING_SLOW || v=%s || dur_ms=%.2f || len_html=%d || reasons=%s",
+        "HTML_SMUGGLING_SLOW || v=%s || dur_ms=%.2f || reasons=%s",
         VERSION,
         tonumber(dur_ms) or 0,
-        0,
         why_s
       ))
     end
@@ -1861,6 +1824,10 @@ if ENABLED then
   end
 
   reg_marker("HTML_SMUGGLING_TEST",                  "HTML smuggling test mode marker")
+  reg_marker("HTML_SMUGGLING_MARKER_SERVICEWORKER",  "HTML smuggling marker: ServiceWorker API usage")
+  reg_marker("HTML_SMUGGLING_MARKER_WEBCRYPTO",      "HTML smuggling marker: WebCrypto API usage")
+  reg_marker("HTML_SMUGGLING_MARKER_QR_CANVAS",      "HTML smuggling marker: QR or Canvas lure usage")
+  reg_marker("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD",  "HTML smuggling marker: split payload construction detected")
 
   reg_marker("HTML_SMUGGLING_CRITICAL_PE",           "HTML smuggling decoded PE payload")
   reg_marker("HTML_SMUGGLING_CRITICAL_WASM",         "HTML smuggling decoded WebAssembly module")
@@ -1876,10 +1843,4 @@ if ENABLED then
   reg_marker("HTML_SMUGGLING_CRITICAL_CAB",          "HTML smuggling decoded CAB archive")
   reg_marker("HTML_SMUGGLING_CRITICAL_7ZIP",         "HTML smuggling decoded 7ZIP archive")
   reg_marker("HTML_SMUGGLING_CRITICAL_RAR",          "HTML smuggling decoded RAR archive")
-
-  -- v3.1 Sichtbarkeits Marker (auch ohne dec)
-  reg_marker("HTML_SMUGGLING_MARKER_SERVICEWORKER", "HTML smuggling marker: ServiceWorker usage")
-  reg_marker("HTML_SMUGGLING_MARKER_WEBCRYPTO",     "HTML smuggling marker: WebCrypto usage")
-  reg_marker("HTML_SMUGGLING_MARKER_QR_CANVAS",     "HTML smuggling marker: QR Canvas hybrid usage")
-  reg_marker("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", "HTML smuggling marker: split base64 payload pattern")
 end
