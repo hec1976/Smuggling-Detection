@@ -40,7 +40,7 @@ Anstatt Dateiendungen zu vertrauen, dekodiert das Skript Base64-Blobs im Speiche
 
 ---
 
-## 📊 Das Scoring-Modell (5-Stage-System)
+##  Das Scoring-Modell (5-Stage-System)
 
 Das finale Scoring basiert auf einer logischen Kette:
 1.  **Stage 1: Raw Score:** Bewertung technischer Indikatoren (z.B. Vorhandensein von `Blob`).
