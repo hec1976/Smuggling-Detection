@@ -1,1 +1,156 @@
+html_smuggling {
+  # === BASIS ===
+  enabled = true;
+  debug = false;
+  score_debug = false;
+  test_mode = false;
+
+  # === Scoring Steuerung ===
+  # Floor: wenn es anschlaegt, mindestens dieser Wert (hilft gegen "zu tief bewertet")
+  min_score = 3.0;
+
+  # Extra Boost wenn ein harter Payload erkannt wird (PE, WASM, ISO, LNK, MSIX, Script usw.)
+  critical_boost = 5.0;
+
+  # DKIM/SPF Multiplikator im Lua aktivieren oder ignorieren
+  auth_mul_enabled = false;
+
+  # === LOGGING (Production: ruhig, aber brauchbar) ===
+  log_score_threshold = 5.0;        # erst ab da ins Extended Log
+  force_extended_log = true;       # Prod: nicht alles loggen
+  force_extended_log_min_score = 2.0;
+  log_simple_line = false;
+
+  # === NEWSLETTER ===
+  deep_scan_newsletter_header = false;
+
+  heur_mul_default = 1.0;
+  heur_mul_newsletter_header = 0.2;
+  heur_mul_newsletter_heuristic = 0.3;
+  heur_mul_trusted_newsletter = 0.1;
+
+  # === DOMAIN MAPS ===
+  safe_script_domains_map = "file:///etc/rspamd/maps.d/10_allow/safe_script_domains_smuggling.map";
+  trusted_newsletter_domains_map = "file:///etc/rspamd/maps.d/10_allow/trusted_newsletter_domains_smuggling.map";
+  unsafe_script_domains_map = "file:///etc/rspamd/maps.d/30_block/unsafe_script_domains_smuggling.map";
+
+  # === LIMITS (gruppiert) ===
+  limits {
+    scan {
+      max_bytes = 250000;
+      smart_chunk = 50000;
+    }
+    b64 {
+      min_len = 200;
+      max_candidates = 6;
+      max_scan_bytes = 500000;
+      min_decode_total = 1500;
+      big_threshold = 5000;
+      huge_threshold = 20000;
+      join_max_parts = 5;
+      join_max_len = 180000;
+    }
+    decode {
+      max_bytes = 160000;
+      joined_len_mul = 2;
+    }
+    script {
+      max_check = 3;
+      max_external = 3;
+      max_vars = 20;
+    }
+    obfus {
+      min_frag_len = 16;
+      virtual_trigger_len = 120;
+      virtual_max_payloads = 3;
+      resolve_passes = 8;
+      max_uint8array_bytes = 2048;
+      max_entropy_check_bytes = 8192;
+      css_max_style_size = 10000;
+      max_delayed_exec_context = 500;
+    }
+  }
+
+  # === WEIGHTS ===
+  weights {
+    # Basic APIs
+    atob = 0.2;
+    blob = 0.2;
+    createobjecturl = 0.3;
+    data_uri = 0.1;
+    iframe_src = 0.2;
+    fetch = 0.1;
+    filereader = 0.1;
+    uint8array = 0.1;
+
+    # Advanced APIs
+    array_index_api = 0.3;
+    function_constructor = 0.4;
+    eval_api = 0.3;
+    settimeout_api = 0.3;
+    webworker_api = 0.5;
+    serviceworker_api = 0.5;
+    webassembly_api = 0.6;
+    event_handler = 0.3;
+
+    # Techniques
+    split_payload = 1.0;
+    external_script = 0.5;
+    obfus = 0.8;
+    hex_array = 0.8;
+
+    # MS AppInstaller
+    ms_appinstaller_uri = 3.5;
+    appinstaller_file = 0.8;
+
+    # Base64 Indicators
+    b64_total_len_big = 0.6;
+    b64_total_len_huge = 1.2;
+    b64_joined_parts = 0.4;
+    b64_long_html = 0.4;
+
+    # Decoded Payloads (kritisch)
+    dec_pe = 8.0;
+    dec_zip = 5.0;
+    dec_msix = 6.0;
+    dec_appx = 6.0;
+    dec_cab  = 4.0;
+    dec_7zip = 4.0;
+    dec_rar  = 4.0;
+
+    dec_pdf = 1.5;
+    dec_js = 2.5;
+    dec_html = 2.0;
+    dec_xml = 0.6;
+    dec_xml_appinstaller = 3.0;
+    dec_ole = 3.0;
+    dec_vhdx = 5.0;
+    dec_iso = 6.0;
+    dec_lnk = 5.0;
+    dec_script = 4.0;
+    dec_bin = 0.2;
+    dec_wasm = 8.0;
+
+    # Zusatz-Heuristiken
+    atob_obfuscated = 1.2;
+    delayed_execution = 2.0;
+    wasm_uint8array = 8.0;
+    pe_uint8array = 10.0;
+    large_uint8array = 3.0;
+    css_exfiltration = 2.5;
+    polymorphic_obfuscation = 2.0;
+
+    # Combo Scoring
+    combo_smuggling_api = 2.0;
+    combo_atob_plus_b64 = 2.0;
+    combo_msapp_plus_xml = 3.0;
+    combo_zip_plus_smuggling = 2.0;
+    combo_pe = 4.0;
+    combo_hex_plus_smuggling = 1.5;
+    combo_container_plus_smuggling = 2.0;
+    combo_wasm_plus_smuggling = 3.0;
+    combo_external_script = 1.5;
+    combo_split_payload = 2.0;
+  }
+}
 
