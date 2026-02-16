@@ -5,7 +5,7 @@ Diese Testsuite validiert die **Rspamd HTML Smuggling Detection Suite
 
 ------------------------------------------------------------------------
 
-## 1. Aktuelle Test-Matrix (ENTHALTEN)
+##  Aktuelle Test-Matrix (ENTHALTEN)
 
 | Test   | Fokus-Technik         | Erwartete Symbole                                  |
 |--------|-----------------------|----------------------------------------------------|
@@ -19,16 +19,6 @@ Diese Testsuite validiert die **Rspamd HTML Smuggling Detection Suite
 | test8  | DOM Manipulation      | fetch, event_handler_api, dec_bin                  |
 | test9  | Stealth / Unicode     | css_exfiltration, atob (getarnt)                   |
 | test10 | Advanced / All-in-One | svg_onload, wasm_uint8array, combo_hard            |
-
-------------------------------------------------------------------------
-
-## 2. Geplante Erweiterung (NOCH NICHT ENTHALTEN)
-
-> Die folgenden Testfälle sind konzeptionell definiert, aber aktuell
-> **noch nicht implementiert**.
-
-| Test   | Fokus-Technik              | Erwartete Symbole                                      |
-|--------|----------------------------|--------------------------------------------------------|
 | test11 | External Stage Loader      | script_src_external, fetch, blob, createObjectURL      |
 | test12 | WebCrypto AES Payload      | webcrypto_api, aes_decrypt, uint8array, high_entropy   |
 | test13 | QR HTML Hybrid             | qr_canvas_or_svg, event_handler_api, stealth_css       |
@@ -36,6 +26,7 @@ Diese Testsuite validiert die **Rspamd HTML Smuggling Detection Suite
 | test15 | OAuth / Device Code Lure   | oauth_lure, device_code_flow, m365_brand_impersonation |
 
 ------------------------------------------------------------------------
+
 
 ## Ziel der Suite
 
