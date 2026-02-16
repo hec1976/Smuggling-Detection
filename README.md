@@ -84,4 +84,3 @@ Das Modul nutzt ein transparentes Scoring-Verfahren:
 **Version:** 2.9-r1  
 **Lizenz:** MIT  
 
-*Hinweis: Dieses Modul ist ein Werkzeug für Security-Professionals. Nutzen Sie den `test_mode`, um die Granularität optimal auf Ihre spezifische Mail-Umgebung abzustimmen.*
