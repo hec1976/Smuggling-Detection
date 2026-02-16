@@ -55,7 +55,7 @@ Das finale Scoring basiert auf einer logischen Kette:
 
 ### Datei-Pfade
 *   **Skript:** `/etc/rspamd/lua.local.d/html_smuggling.lua`
-*   **Config:** `/etc/rspamd/local.d/html_smuggling.conf`
+*   **Config:** `/etc/rspamd/rspamd.conf.local`
 
 ### Konfigurations-Beispiel
 ```lua
