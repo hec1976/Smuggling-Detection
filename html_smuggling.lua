@@ -1,12 +1,16 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v2.9-r1
--- Fokus: saubere Scoring Stages, kein goto, korrektes after_combos und after_auth
--- Optimiert fuer High Volume
+-- HTML Smuggling Detection v3.1
+-- Fokus: saubere Scoring Stages, kein goto, robuste Deobfuscation, Marker fuer ServiceWorker, WebCrypto, QR Canvas, Split Payload
+-- v3.1 Fixes:
+--   1) Marker Symbole (sichtbar auch ohne dec_*)
+--   2) Split Payload: virtual base64 (aus Variablen/Join) wird als Kandidat fuer Decode genutzt
+--   3) Deobfuscation Rueckgabe erweitert (virtuals Tabelle statt Count)
+-- Performance: harte Gates, Smart Scan, Budgets, pcall Safety, dur_ms Logging
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
 
-local VERSION = "2.9-r1"
+local VERSION = "3.1"
 
 -- =========================
 -- Config lesen
@@ -20,16 +24,19 @@ local TEST_MODE = (CFG.test_mode == true)
 -- Logging Steuerung
 local LOG_SCORE_THRESHOLD = tonumber(CFG.log_score_threshold) or 5.0
 local LOG_SIMPLE_LINE     = (CFG.log_simple_line == true)
-local SCORE_DEBUG         = (CFG.score_debug == true)  -- separates Score Debug Logging (unabhaengig von DEBUG)
+local SCORE_DEBUG         = (CFG.score_debug == true)
 
--- v2.7+ Extended Logging forcieren (kontrolliert)
+-- Extended Logging forcieren (kontrolliert)
 local FORCE_EXTENDED_LOG           = (CFG.force_extended_log == true)
 local FORCE_EXTENDED_LOG_MIN_SCORE = tonumber(CFG.force_extended_log_min_score) or 0.1
+
+-- Slow Log
+local SLOW_LOG_MS = tonumber(CFG.slow_log_ms) or 150.0
 
 -- Newsletter Handling
 local DEEP_SCAN_NEWSLETTER_HEADER = (CFG.deep_scan_newsletter_header ~= false)
 
--- Scoring Steuerung (neu/sauber)
+-- Scoring Steuerung
 local MIN_SCORE           = tonumber(CFG.min_score) or 0.0
 local CRITICAL_BOOST      = tonumber(CFG.critical_boost) or 0.0
 local AUTH_MUL_ENABLED    = (CFG.auth_mul_enabled == true)
@@ -66,6 +73,13 @@ local LIMITS = {
     max_check = 3,
     max_external = 5,
     max_vars = 20,
+
+    smart_chunk = 20000,
+    max_script_len = 80000,
+    max_total_script_scan = 120000,
+    max_script_time_ms = 80.0,
+
+    deobfus_timeout_ms = 50.0,
   },
   obfus = {
     min_frag_len = 16,
@@ -74,7 +88,7 @@ local LIMITS = {
     resolve_passes = 8,
 
     max_uint8array_bytes = 2048,
-    max_entropy_check_bytes = 8192,
+    max_entropy_check_bytes = 4096,
     css_max_style_size = 10000,
     max_delayed_exec_context = 500,
   }
@@ -156,6 +170,12 @@ local W = {
   large_uint8array = 3.0,
   css_exfiltration = 2.5,
   polymorphic_obfuscation = 2.0,
+
+  -- v3.1 Sichtbarkeits Marker (auch ohne dec_*)
+  marker_serviceworker = 0.6,
+  marker_webcrypto     = 0.6,
+  marker_qr_canvas     = 0.6,
+  marker_split_strong  = 0.8,
 }
 
 local function merge_numbers(dst, src)
@@ -168,15 +188,21 @@ local function merge_numbers(dst, src)
   end
 end
 
-local function merge_numbers_deep(dst, src)
+local function validate_positive(val, default, min_val)
+  local n = tonumber(val)
+  local minv = tonumber(min_val) or 0
+  if not n or n < minv then return default end
+  return n
+end
+
+local function merge_numbers_deep_valid(dst, src, min_val)
   if type(dst) ~= "table" or type(src) ~= "table" then return end
   for k, v in pairs(src) do
     if type(v) == "table" and type(dst[k]) == "table" then
-      merge_numbers_deep(dst[k], v)
+      merge_numbers_deep_valid(dst[k], v, min_val)
     else
-      local n = tonumber(v)
-      if n ~= nil and dst[k] ~= nil then
-        dst[k] = n
+      if dst[k] ~= nil then
+        dst[k] = validate_positive(v, dst[k], min_val)
       end
     end
   end
@@ -187,7 +213,7 @@ local function apply_legacy_limits(src)
 
   local function set_if_num(path, v)
     local n = tonumber(v)
-    if n == nil then return end
+    if n == nil or n < 0 then return end
     local t = LIMITS
     for i = 1, #path - 1 do
       t = t[path[i]]
@@ -215,6 +241,7 @@ local function apply_legacy_limits(src)
   set_if_num({"script","max_check"}, src.scripts_max_check)
   set_if_num({"script","max_external"}, src.max_external_scripts)
   set_if_num({"script","max_vars"}, src.max_vars_to_track)
+  set_if_num({"script","deobfus_timeout_ms"}, src.deobfus_timeout_ms)
 
   set_if_num({"obfus","min_frag_len"}, src.min_frag_len)
   set_if_num({"obfus","virtual_trigger_len"}, src.virtual_trigger_len)
@@ -228,7 +255,7 @@ end
 
 if type(CFG.limits) == "table" then
   if CFG.limits.scan or CFG.limits.b64 or CFG.limits.decode or CFG.limits.script or CFG.limits.obfus then
-    merge_numbers_deep(LIMITS, CFG.limits)
+    merge_numbers_deep_valid(LIMITS, CFG.limits, 0)
   else
     apply_legacy_limits(CFG.limits)
   end
@@ -342,13 +369,34 @@ local function safe_decode_base64(task, b64, limit)
   return res
 end
 
+-- Smart Scan fuer grosse Texte
+local function smart_text_scan(s, chunk)
+  if not s then return "" end
+  s = tostring(s)
+  local c = tonumber(chunk) or 20000
+  if #s <= c then return s end
+
+  local parts = {}
+  parts[#parts + 1] = s:sub(1, c)
+  parts[#parts + 1] = s:sub(-c)
+
+  if #s > (c * 4) then
+    local mid = math.floor(#s / 2)
+    local start = math.max(1, mid - math.floor(c / 2))
+    parts[#parts + 1] = s:sub(start, start + c)
+  end
+
+  return table.concat(parts, "\n")
+end
+
 -- =========================
 -- Entropy
 -- =========================
 local function calculate_entropy(s)
   if not s or #s == 0 then return 0 end
-  if #s > (LOBFUS.max_entropy_check_bytes or 8192) then
-    s = s:sub(1, LOBFUS.max_entropy_check_bytes)
+  local maxb = tonumber(LOBFUS.max_entropy_check_bytes) or 4096
+  if #s > maxb then
+    s = s:sub(1, maxb)
   end
 
   local freq = {}
@@ -369,9 +417,9 @@ local function calculate_entropy(s)
 end
 
 -- =========================
--- Extended Logging (1 String)
+-- Extended Logging (1 String, mit dur_ms)
 -- =========================
-local function log_detection_extended(task, score, critical_kind, NL, NL_reason, reasons, external_scripts)
+local function log_detection_extended(task, score, critical_kind, NL, NL_reason, reasons, external_scripts, dur_ms)
   local why = table_keys_sorted(reasons)
   local from = task:get_from_addr()
   local from_s = from and from:to_string() or "unknown"
@@ -401,6 +449,9 @@ local function log_detection_extended(task, score, critical_kind, NL, NL_reason,
   local msgid = task:get_message_id() or "none"
   local subj = task:get_subject() or "none"
 
+  if subj and #subj > 160 then subj = subj:sub(1,160) end
+  if msgid and #msgid > 160 then msgid = msgid:sub(1,160) end
+
   local auth_status = {}
   if task:get_symbol("R_DKIM_ALLOW") then auth_status[#auth_status + 1] = "DKIM_OK" end
   if task:get_symbol("R_DKIM_REJECT") then auth_status[#auth_status + 1] = "DKIM_FAIL" end
@@ -409,7 +460,7 @@ local function log_detection_extended(task, score, critical_kind, NL, NL_reason,
   local auth_s = #auth_status > 0 and table.concat(auth_status, ",") or "none"
 
   local line = string.format(
-    "HTML_SMUGGLING_DETECTION || version=%s || score=%.2f || critical=%s || newsletter=%s || nl_reason=%s || reasons=%s || external_scripts=%s || from=%s || to=%s || ip=%s || msgid=%s || subject=%s || auth=%s || ts=%d",
+    "HTML_SMUGGLING_DETECTION || version=%s || score=%.2f || critical=%s || newsletter=%s || nl_reason=%s || reasons=%s || external_scripts=%s || from=%s || to=%s || ip=%s || msgid=%s || subject=%s || auth=%s || dur_ms=%.2f || ts=%d",
     VERSION,
     tonumber(score) or 0,
     safe_str(critical_kind, "none"),
@@ -423,6 +474,7 @@ local function log_detection_extended(task, score, critical_kind, NL, NL_reason,
     safe_str(msgid, "none"),
     safe_str(subj, "none"),
     safe_str(auth_s, "none"),
+    tonumber(dur_ms) or 0,
     os.time()
   )
   rspamd_logger.infox(task, line)
@@ -474,7 +526,7 @@ end
 -- Newsletter Detection
 -- =========================
 local function is_newsletter(task)
-  local h = task:get_header("X-HEC-MailClass") or task:get_header("X-HEC-Category")
+  local h = task:get_header("X-HEC-MailClass") or task:get_header("X-HEC-Category") or task:get_header("X-FortiMail-Profile")
   if h then
     local hl = tostring(h):lower()
     if hl:find("newsletter", 1, true) or hl:find("marketing", 1, true) or hl:find("bulk", 1, true) then
@@ -521,26 +573,6 @@ local function compute_heur_mul(task, NL, NL_reason)
 end
 
 -- =========================
--- Smart Scan
--- =========================
-local function smart_html_scan(html)
-  local chunk = tonumber(LSCAN.smart_chunk) or (50 * 1024)
-  if not html or #html <= chunk then return html end
-
-  local parts = {}
-  parts[#parts + 1] = html:sub(1, chunk)
-  parts[#parts + 1] = html:sub(-chunk)
-
-  if #html > (chunk * 4) then
-    local mid = math.floor(#html / 2)
-    local s = math.max(1, mid - math.floor(chunk / 2))
-    parts[#parts + 1] = html:sub(s, s + chunk)
-  end
-
-  return table.concat(parts, "\n")
-end
-
--- =========================
 -- Base64 Candidates
 -- =========================
 local function extract_b64_candidates(text, max_candidates_override)
@@ -555,12 +587,15 @@ local function extract_b64_candidates(text, max_candidates_override)
   local max_cand = max_candidates_override or (LB64.max_candidates or 6)
   local pat = "[A-Za-z0-9%+/_%%-]{" .. tostring(LB64.min_len or 200) .. ",}={0,2}"
 
-  local start_time = os.clock()
+  local start_time = rspamd_util.get_ticks()
   local iter_count = 0
 
   for m in text:gmatch(pat) do
     iter_count = iter_count + 1
-    if (iter_count % 100 == 0) and (os.clock() - start_time > 0.1) then break end
+    if (iter_count % 80 == 0) then
+      local dt_ms = (rspamd_util.get_ticks() - start_time) / 1000.0
+      if dt_ms > 25.0 then break end
+    end
     if #candidates >= max_cand then break end
 
     local nb = normalize_b64(m)
@@ -577,10 +612,25 @@ local function extract_b64_candidates(text, max_candidates_override)
 end
 
 -- =========================
--- Deobfuscation (kein goto)
+-- Deobfuscation (v3.1: virtuals werden zurueckgegeben)
 -- =========================
-local function advanced_deobfuscate(script)
-  if not script or #script < 50 then return script, 0, 0 end
+local function advanced_deobfuscate(script, timeout_ms)
+  if not script or #script < 50 then return script, {}, 0 end
+
+  local max_len = tonumber(LSCRIPT.max_script_len) or 80000
+  if #script > max_len then
+    script = script:sub(1, max_len)
+  end
+
+  local t0 = rspamd_util.get_ticks()
+  local budget = tonumber(timeout_ms) or tonumber(LSCRIPT.deobfus_timeout_ms) or 50.0
+  local timeout_flag = 0
+
+  local function timed_out(op_cnt)
+    if (op_cnt % 10) ~= 0 then return false end
+    local dt_ms = (rspamd_util.get_ticks() - t0) / 1000.0
+    return dt_ms > budget
+  end
 
   local clean = script
   local var_map = {}
@@ -608,14 +658,25 @@ local function advanced_deobfuscate(script)
     var_cnt = var_cnt + 1
   end
 
-  for _kw, name, val in script:gmatch("(const|let|var)%s+([%w_]+)%s*=%s*['\"]([^'\"]+)['\"]") do
-    remember_var(name, val)
+  local decl_ops = 0
+  for _, kw in ipairs({"const", "let", "var"}) do
+    local pattern = kw .. "%s+([%w_]+)%s*=%s*['\"]([^'\"]+)['\"]"
+    for name, val in script:gmatch(pattern) do
+      decl_ops = decl_ops + 1
+      if timed_out(decl_ops) then timeout_flag = 1; return clean, virtuals, timeout_flag end
+      remember_var(name, val)
+    end
   end
 
+  local add_ops = 0
   for name, val in script:gmatch("([%w_]+)%s*%+=%s*['\"]([^'\"]+)['\"]") do
+    add_ops = add_ops + 1
+    if timed_out(add_ops) then timeout_flag = 1; return clean, virtuals, timeout_flag end
     if var_cnt >= (LSCRIPT.max_vars or 20) then break end
+
     name = trim(name)
     val = (val or ""):gsub("%s+", "")
+
     if is_frag_base64ish(val) then
       if not var_map[name] then
         if var_cnt >= (LSCRIPT.max_vars or 20) then break end
@@ -678,10 +739,18 @@ local function advanced_deobfuscate(script)
     return nil
   end
 
-  for _ = 1, (LOBFUS.resolve_passes or 8) do
+  local passes = tonumber(LOBFUS.resolve_passes) or 8
+  if #script > 20000 then passes = math.min(passes, 4) end
+  if #script > 40000 then passes = math.min(passes, 2) end
+
+  local resolve_ops = 0
+  for _ = 1, passes do
     local changed = false
 
     for target, expr in script:gmatch("([%w_]+)%s*=%s*([^;\n]+)") do
+      resolve_ops = resolve_ops + 1
+      if timed_out(resolve_ops) then timeout_flag = 1; return clean, virtuals, timeout_flag end
+
       repeat
         target = trim(target)
         expr = trim(expr)
@@ -712,7 +781,7 @@ local function advanced_deobfuscate(script)
   end
 
   clean = clean:gsub('["\']%s*%+%s*["\']', "")
-  return clean, #virtuals, 0
+  return clean, virtuals, timeout_flag
 end
 
 -- =========================
@@ -839,7 +908,7 @@ local function detect_css_exfiltration(html)
   return score, reasons
 end
 
-local function detect_polymorphic_obfuscation(script, task)
+local function detect_polymorphic_obfuscation(script)
   local score = 0
   local reasons = {}
 
@@ -893,62 +962,66 @@ local function byte_clamp(n)
 end
 
 local function detect_uint8array_payload(script)
-  local lc = script:lower()
-  local score = 0
-  local critical = nil
-  local reasons = {}
+  local ok, a, b, c = pcall(function()
+    local lc = (script or ""):lower()
+    local score = 0
+    local critical = nil
+    local reasons = {}
 
-  local array_pattern = "uint8array%s*%(%s*%[%s*([%d%s,]+)"
-  for array_content in lc:gmatch(array_pattern) do
-    local byte_values = {}
-    local byte_count = 0
-    local maxb = tonumber(LOBFUS.max_uint8array_bytes) or 2048
+    local array_pattern = "uint8array%s*%(%s*%[%s*([%d%s,]+)"
+    for array_content in lc:gmatch(array_pattern) do
+      local byte_values = {}
+      local byte_count = 0
+      local maxb = tonumber(LOBFUS.max_uint8array_bytes) or 2048
 
-    for num_str in array_content:gmatch("%d+") do
-      byte_count = byte_count + 1
-      if byte_count <= maxb then byte_values[#byte_values + 1] = tonumber(num_str) or 0 end
-      if byte_count > maxb then break end
-    end
+      for num_str in array_content:gmatch("%d+") do
+        byte_count = byte_count + 1
+        if byte_count <= maxb then byte_values[#byte_values + 1] = tonumber(num_str) or 0 end
+        if byte_count > maxb then break end
+      end
 
-    if byte_count > 1024 then
-      local header = ""
-      local ok_header = pcall(function()
+      if byte_count > 1024 then
         local header_bytes = {}
         for i = 1, math.min(16, #byte_values) do
           header_bytes[#header_bytes + 1] = string.char(byte_clamp(byte_values[i]))
         end
-        header = table.concat(header_bytes)
-      end)
+        local header = table.concat(header_bytes)
 
-      if ok_header and #header >= 4 then
-        if header:sub(1,4) == "\000asm" then
-          score = W.wasm_uint8array
-          critical = "WASM"
-          reasons[#reasons + 1] = "wasm_uint8array"
-        elseif header:sub(1,2) == "MZ" then
-          score = W.pe_uint8array
-          critical = "PE"
-          reasons[#reasons + 1] = "pe_uint8array"
-        elseif header:sub(1,4) == "PK\003\004" then
-          score = W.dec_zip
-          critical = "ZIP"
-          reasons[#reasons + 1] = "zip_uint8array"
-        elseif header:sub(1,5) == "%PDF-" then
-          score = W.dec_pdf
-          reasons[#reasons + 1] = "pdf_uint8array"
+        if #header >= 4 then
+          if header:sub(1,4) == "\000asm" then
+            score = W.wasm_uint8array
+            critical = "WASM"
+            reasons[#reasons + 1] = "wasm_uint8array"
+          elseif header:sub(1,2) == "MZ" then
+            score = W.pe_uint8array
+            critical = "PE"
+            reasons[#reasons + 1] = "pe_uint8array"
+          elseif header:sub(1,4) == "PK\003\004" then
+            score = W.dec_zip
+            critical = "ZIP"
+            reasons[#reasons + 1] = "zip_uint8array"
+          elseif header:sub(1,5) == "%PDF-" then
+            score = W.dec_pdf
+            reasons[#reasons + 1] = "pdf_uint8array"
+          else
+            score = W.large_uint8array
+            reasons[#reasons + 1] = "large_uint8array"
+          end
         else
           score = W.large_uint8array
           reasons[#reasons + 1] = "large_uint8array"
         end
-      else
-        score = W.large_uint8array
-        reasons[#reasons + 1] = "large_uint8array"
+        break
       end
-      break
     end
-  end
 
-  return score, critical, reasons
+    return score, critical, reasons
+  end)
+
+  if not ok then
+    return 0, nil, {}
+  end
+  return a, b, c
 end
 
 local function detect_split_payload(html)
@@ -1058,101 +1131,113 @@ local function le_u16(s, off)
 end
 
 local function is_valid_pe(bin)
-  if not bin or #bin < 256 then return false end
-  if bin:sub(1,2) ~= "MZ" then return false end
+  local ok, res = pcall(function()
+    if not bin or #bin < 256 then return false end
+    if bin:sub(1,2) ~= "MZ" then return false end
 
-  local e_lfanew = le_u32(bin, 0x3C + 1)
-  if not e_lfanew then return false end
-  if e_lfanew < 0x40 or e_lfanew > (#bin - 256) then return false end
+    local e_lfanew = le_u32(bin, 0x3C + 1)
+    if not e_lfanew then return false end
+    if e_lfanew < 0x40 or e_lfanew > (#bin - 256) then return false end
 
-  local pe_off = e_lfanew + 1
-  if bin:sub(pe_off, pe_off+3) ~= "PE\000\000" then return false end
+    local pe_off = e_lfanew + 1
+    if bin:sub(pe_off, pe_off+3) ~= "PE\000\000" then return false end
 
-  local machine = le_u16(bin, pe_off + 4)
-  if not machine then return false end
+    local machine = le_u16(bin, pe_off + 4)
+    if not machine then return false end
 
-  local ok_machine = (machine == 0x014c) or (machine == 0x8664) or (machine == 0x01c0) or (machine == 0xaa64)
-  if not ok_machine then return false end
-  return true
+    local ok_machine = (machine == 0x014c) or (machine == 0x8664) or (machine == 0x01c0) or (machine == 0xaa64)
+    if not ok_machine then return false end
+    return true
+  end)
+
+  if not ok then return false end
+  return res == true
 end
 
 -- =========================
 -- Payload Sniffing
 -- =========================
 local function sniff_decoded(bin)
-  if not bin or #bin < 16 then return nil end
+  local ok, result = pcall(function()
+    if not bin or #bin < 16 then return nil end
 
-  if is_valid_pe(bin) then return "PE" end
-  if bin:sub(1,4) == "MSCF" then return "CAB" end
-  if bin:sub(1,6) == "7z\xBC\xAF\x27\x1C" then return "7ZIP" end
-  if bin:sub(1,6) == "Rar!\x1A\x07" then return "RAR" end
+    if is_valid_pe(bin) then return "PE" end
+    if bin:sub(1,4) == "MSCF" then return "CAB" end
+    if bin:sub(1,6) == "7z\xBC\xAF\x27\x1C" then return "7ZIP" end
+    if bin:sub(1,6) == "Rar!\x1A\x07" then return "RAR" end
 
-  if bin:sub(1,4) == "PK\003\004" or bin:sub(1,4) == "PK\005\006" then
-    local head = bin:sub(1, 200000)
-    if head:find("AppxManifest%.xml", 1, true) or head:find("AppxBlockMap%.xml", 1, true) or head:find("AppxSignature%.p7x", 1, true) or head:find("AppxMetadata/", 1, true) then
-      if head:find("AppxManifest%.xml", 1, true) then return "APPX" end
-      return "MSIX"
+    if bin:sub(1,4) == "PK\003\004" or bin:sub(1,4) == "PK\005\006" then
+      local head = bin:sub(1, 200000)
+      if head:find("AppxManifest%.xml", 1, true) or head:find("AppxBlockMap%.xml", 1, true) or head:find("AppxSignature%.p7x", 1, true) or head:find("AppxMetadata/", 1, true) then
+        if head:find("AppxManifest%.xml", 1, true) then return "APPX" end
+        return "MSIX"
+      end
+      return "ZIP"
     end
-    return "ZIP"
-  end
 
-  if bin:sub(1,5) == "%PDF-" then return "PDF" end
-  if bin:sub(1,8) == "\208\207\017\224\161\177\026\225" then return "OLE" end
-  if bin:sub(1,8) == "vhdxfile" then return "VHDX" end
+    if bin:sub(1,5) == "%PDF-" then return "PDF" end
+    if bin:sub(1,8) == "\208\207\017\224\161\177\026\225" then return "OLE" end
+    if bin:sub(1,8) == "vhdxfile" then return "VHDX" end
 
-  if #bin >= 0x8001 + 5 and bin:sub(0x8001 + 1, 0x8001 + 5) == "CD001" then
-    return "ISO"
-  elseif #bin >= 2048 and bin:sub(1, 2048):find("CD001", 1, true) then
-    return "ISO"
-  end
-
-  if bin:sub(1,4) == "\076\000\000\000" then
-    local h = bin:sub(1,64)
-    if h:find("\001\020\002\000\000\000\000\000\192\000\000\000\000\000\000\070", 1, true) then
-      return "LNK"
+    if #bin >= 0x8001 + 5 and bin:sub(0x8001 + 1, 0x8001 + 5) == "CD001" then
+      return "ISO"
+    elseif #bin >= 2048 and bin:sub(1, 2048):find("CD001", 1, true) then
+      return "ISO"
     end
+
+    if bin:sub(1,4) == "\076\000\000\000" then
+      local h = bin:sub(1,64)
+      if h:find("\001\020\002\000\000\000\000\000\192\000\000\000\000\000\000\070", 1, true) then
+        return "LNK"
+      end
+    end
+
+    if bin:sub(1,4) == "\000asm" then return "WASM" end
+    if bin:sub(1,8) == "\000asm\001\000\000\000" then return "WASM" end
+
+    local head = bin:sub(1,4096)
+    local l = head:lower()
+
+    if l:find("<?xml", 1, true) or l:find("<appinstaller", 1, true) then return "XML" end
+    if l:find("<html", 1, true) or l:find("<script", 1, true) then return "HTML" end
+
+    local vbs_ind = 0
+    if l:find("wscript%.createobject", 1, true) then vbs_ind = vbs_ind + 1 end
+    if l:find("on error resume next", 1, true) then vbs_ind = vbs_ind + 1 end
+    if l:find("createobject%s*%(", 1, false) then vbs_ind = vbs_ind + 1 end
+    if vbs_ind >= 2 then return "VBS" end
+
+    local ps_ind = 0
+    if l:find("powershell", 1, true) then ps_ind = ps_ind + 1 end
+    if l:find("invoke%-expression", 1, true) then ps_ind = ps_ind + 1 end
+    if l:find("%biex%b", 1, false) or l:find("%-enc%s+", 1, false) then ps_ind = ps_ind + 1 end
+    if ps_ind >= 2 then return "PS1" end
+
+    local bat_ind = 0
+    if l:find("@echo off", 1, true) then bat_ind = bat_ind + 1 end
+    if l:find("cmd%.exe", 1, true) or l:find("start%s+/", 1, false) then bat_ind = bat_ind + 1 end
+    if l:find("%%[a-z]%%", 1, false) then bat_ind = bat_ind + 1 end
+    if bat_ind >= 2 then return "BAT" end
+
+    local js_ind = 0
+    if l:find("function%s*[%w_]*%s*%(", 1, false) then js_ind = js_ind + 1 end
+    if l:find("var%s+[%w_]+", 1, false) or l:find("let%s+[%w_]+", 1, false) or l:find("const%s+[%w_]+", 1, false) then
+      js_ind = js_ind + 1
+    end
+    if l:find("=>", 1, true) then js_ind = js_ind + 1 end
+    if l:find("eval%s*%(", 1, false) then js_ind = js_ind + 1 end
+    if l:find("atob%s*%(", 1, false) then js_ind = js_ind + 1 end
+    if l:find("document%.createelement", 1, true) then js_ind = js_ind + 1 end
+    if l:find("addeventlistener", 1, true) then js_ind = js_ind + 1 end
+    if js_ind >= 2 then return "JS" end
+
+    return "BINARY"
+  end)
+
+  if not ok then
+    return "BINARY"
   end
-
-  if bin:sub(1,4) == "\000asm" then return "WASM" end
-  if bin:sub(1,8) == "\000asm\001\000\000\000" then return "WASM" end
-
-  local head = bin:sub(1,4096)
-  local l = head:lower()
-
-  if l:find("<?xml", 1, true) or l:find("<appinstaller", 1, true) then return "XML" end
-  if l:find("<html", 1, true) or l:find("<script", 1, true) then return "HTML" end
-
-  local vbs_ind = 0
-  if l:find("wscript%.createobject", 1, true) then vbs_ind = vbs_ind + 1 end
-  if l:find("on error resume next", 1, true) then vbs_ind = vbs_ind + 1 end
-  if l:find("createobject%s*%(", 1, false) then vbs_ind = vbs_ind + 1 end
-  if vbs_ind >= 2 then return "VBS" end
-
-  local ps_ind = 0
-  if l:find("powershell", 1, true) then ps_ind = ps_ind + 1 end
-  if l:find("invoke%-expression", 1, true) then ps_ind = ps_ind + 1 end
-  if l:find("%biex%b", 1, false) or l:find("%-enc%s+", 1, false) then ps_ind = ps_ind + 1 end
-  if ps_ind >= 2 then return "PS1" end
-
-  local bat_ind = 0
-  if l:find("@echo off", 1, true) then bat_ind = bat_ind + 1 end
-  if l:find("cmd%.exe", 1, true) or l:find("start%s+/", 1, false) then bat_ind = bat_ind + 1 end
-  if l:find("%%[a-z]%%", 1, false) then bat_ind = bat_ind + 1 end
-  if bat_ind >= 2 then return "BAT" end
-
-  local js_ind = 0
-  if l:find("function%s*[%w_]*%s*%(", 1, false) then js_ind = js_ind + 1 end
-  if l:find("var%s+[%w_]+", 1, false) or l:find("let%s+[%w_]+", 1, false) or l:find("const%s+[%w_]+", 1, false) then
-    js_ind = js_ind + 1
-  end
-  if l:find("=>", 1, true) then js_ind = js_ind + 1 end
-  if l:find("eval%s*%(", 1, false) then js_ind = js_ind + 1 end
-  if l:find("atob%s*%(", 1, false) then js_ind = js_ind + 1 end
-  if l:find("document%.createelement", 1, true) then js_ind = js_ind + 1 end
-  if l:find("addeventlistener", 1, true) then js_ind = js_ind + 1 end
-  if js_ind >= 2 then return "JS" end
-
-  return "BINARY"
+  return result
 end
 
 local function part_is_htmlish(p)
@@ -1195,13 +1280,12 @@ local function part_is_htmlish(p)
 end
 
 -- =========================
--- Main Detection v2.9-r1
+-- Main Detection v3.1
 -- =========================
 local function detect_html_smuggling_payload(task)
   if not ENABLED then return end
 
-  local t0 = nil
-  if DEBUG then t0 = os.clock() end
+  local t_start = rspamd_util.get_ticks()
 
   local parts = task:get_parts()
   if not parts then return end
@@ -1234,12 +1318,16 @@ local function detect_html_smuggling_payload(task)
   local max_joined_decode = (tonumber(LDEC.max_bytes) or (160 * 1024)) * decode_mul
   local min_decode_total = tonumber(LB64.min_decode_total) or 1500
 
+  local script_time_budget_ms = tonumber(LSCRIPT.max_script_time_ms) or 80.0
+  local total_script_scan_budget = tonumber(LSCRIPT.max_total_script_scan) or 120000
+  local total_script_scanned = 0
+
   for _, p in ipairs(parts) do
     if part_is_htmlish(p) then
       local c = p:get_content()
       if c then
         local html = normalize_text(c)
-        html = smart_html_scan(html)
+        html = smart_text_scan(html, LSCAN.smart_chunk)
 
         if #html > (LSCAN.max_bytes or (200 * 1024)) then
           html = html:sub(1, LSCAN.max_bytes)
@@ -1268,6 +1356,12 @@ local function detect_html_smuggling_payload(task)
           has_script_tags = (lc:find("<script", 1, true) ~= nil),
           has_js_keywords = (lc:find("function", 1, true) ~= nil) or (lc:find("var ", 1, true) ~= nil) or (lc:find("let ", 1, true) ~= nil) or (lc:find("const ", 1, true) ~= nil),
           has_b64_pattern = (lc:find("[a-z0-9+/]{100,}", 1, false) ~= nil),
+
+          -- v3.1 Marker Klassen
+          has_serviceworker = (lc:find("serviceworker", 1, true) ~= nil),
+          has_webcrypto = (lc:find("crypto.subtle", 1, true) ~= nil) or (lc:find("subtle.encrypt", 1, true) ~= nil) or (lc:find("subtle.decrypt", 1, true) ~= nil),
+          has_canvas = (lc:find("<canvas", 1, true) ~= nil) or (lc:find("getcontext('2d')", 1, true) ~= nil) or (lc:find("getcontext(\"2d\")", 1, true) ~= nil),
+          has_qr = (lc:find("qrcode", 1, true) ~= nil) or (lc:find("qr", 1, true) ~= nil),
         }
 
         if flags.has_atob and lc:find("atob%s*%(", 1, false) then
@@ -1288,6 +1382,27 @@ local function detect_html_smuggling_payload(task)
 
         detect_advanced_api_calls(lc, add)
 
+        -- v3.1 Marker: Service Worker (sichtbar auch ohne dec)
+        if flags.has_serviceworker then
+          add(W.marker_serviceworker or 0.6, "marker_serviceworker", false)
+          task:insert_result("HTML_SMUGGLING_MARKER_SERVICEWORKER", 1.0)
+        end
+
+        -- v3.1 Marker: WebCrypto (sichtbar auch ohne dec)
+        if flags.has_webcrypto then
+          add(W.marker_webcrypto or 0.6, "marker_webcrypto", false)
+          task:insert_result("HTML_SMUGGLING_MARKER_WEBCRYPTO", 1.0)
+        end
+
+        -- v3.1 Marker: QR Canvas Hybrid
+        if flags.has_canvas and flags.has_qr then
+          add(W.marker_qr_canvas or 0.6, "marker_qr_canvas", false)
+          task:insert_result("HTML_SMUGGLING_MARKER_QR_CANVAS", 1.0)
+          if lc:find("data:image", 1, true) or lc:find("--payload", 1, true) then
+            reasons["qr_payload_hint"] = true
+          end
+        end
+
         if flags.has_iframe and lc:find("src%s*=", 1, false) then add(W.iframe_src, "iframe_src", false) end
         if lc:find("src%s*=", 1, false) and flags.has_data_uri then add(W.data_uri, "data_uri", false) end
 
@@ -1306,6 +1421,8 @@ local function detect_html_smuggling_payload(task)
 
         if flags.has_js_keywords and detect_split_payload(html) then
           add(W.split_payload, "split_payload", false)
+          add(W.marker_split_strong or 0.8, "marker_split_payload", false)
+          task:insert_result("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", 1.0)
         end
 
         if lc:find("settimeout", 1, true) or lc:find("setinterval", 1, true) then
@@ -1350,18 +1467,38 @@ local function detect_html_smuggling_payload(task)
 
         if deep_scan and smugglingish and allow_b64_scan and (flags.has_script_tags or flags.has_script_close) then
           local scripts_checked = 0
+          local script_loop_start = rspamd_util.get_ticks()
 
           for script in html:gmatch("<script[^>]*>(.-)</script>") do
             scripts_checked = scripts_checked + 1
 
+            local dt_ms = (rspamd_util.get_ticks() - script_loop_start) / 1000.0
+            if dt_ms > script_time_budget_ms then
+              reasons["script_time_budget"] = true
+              break
+            end
+            if total_script_scanned >= total_script_scan_budget then
+              reasons["script_total_budget"] = true
+              break
+            end
+
             repeat
+              if not script or #script < 40 then break end
+
+              local max_script_len = tonumber(LSCRIPT.max_script_len) or 80000
+              if #script > max_script_len then
+                script = script:sub(1, max_script_len)
+              end
+
               local sl = script:lower()
               local maybe_b64 = allow_b64_scan and ((sl:find("atob", 1, true) ~= nil) or (sl:find("base64", 1, true) ~= nil))
               local maybe_concat = (sl:find("%+=", 1, false) ~= nil) or (sl:find(".join", 1, true) ~= nil)
-              local maybe_obfus = (sl:find("\\x", 1, true) ~= nil) or (sl:find("\\u", 1, true) ~= nil) or (sl:find("fromcharcode", 1, true) ~= nil)
+              local maybe_obfus = (sl:find("\\x", 1, true) ~= nil) or (sl:find("\\u", 1, true) ~= nil) or (sl:find("fromcharcode", 1, true) ~= nil) or (sl:find("_0x", 1, true) ~= nil)
               local maybe_uint8 = (sl:find("uint8array", 1, true) ~= nil)
 
               if not (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8) then break end
+
+              total_script_scanned = total_script_scanned + math.min(#script, (tonumber(LSCRIPT.smart_chunk) or 20000) * 2)
 
               if maybe_uint8 then
                 local ua_score, ua_critical, ua_reasons = detect_uint8array_payload(script)
@@ -1372,8 +1509,8 @@ local function detect_html_smuggling_payload(task)
                 end
               end
 
-              do
-                local poly_score, poly_reasons = detect_polymorphic_obfuscation(script, task)
+              if maybe_obfus then
+                local poly_score, poly_reasons = detect_polymorphic_obfuscation(script)
                 if poly_score > 0 then
                   add(W.polymorphic_obfuscation, "polymorphic_obfuscation", false)
                   for _, r in ipairs(poly_reasons) do reasons[r] = true end
@@ -1381,18 +1518,48 @@ local function detect_html_smuggling_payload(task)
               end
 
               if not allow_b64_scan then break end
+              if not (maybe_b64 or maybe_concat or maybe_obfus) then break end
 
-              local normalized_script = script:gsub('"%s*%+%s*"', "")
+              local sscan = smart_text_scan(script, LSCRIPT.smart_chunk)
+
+              local normalized_script = sscan:gsub('"%s*%+%s*"', "")
               normalized_script = normalized_script:gsub("'%s*%+%s*'", "")
-              normalized_script = select(1, advanced_deobfuscate(normalized_script))
 
-              if not normalized_script or #normalized_script < (LB64.min_len or 200) then break end
-              if (normalized_script:find("=", 1, true) == nil) and (#normalized_script < ((LB64.min_len or 200) * 2)) then break end
+              local vlist = nil
+              if maybe_concat or maybe_obfus then
+                local deob, vret, tflag = advanced_deobfuscate(normalized_script, LSCRIPT.deobfus_timeout_ms)
+                normalized_script = deob
+                vlist = vret
+                if tflag == 1 then
+                  reasons["deobfus_timeout"] = true
+                end
+              end
+
+              if not normalized_script or #normalized_script < (LB64.min_len or 200) then
+                -- wenn Script kurz ist, aber wir haben virtuals, dann trotzdem weiter
+                if not (vlist and type(vlist) == "table" and #vlist > 0) then
+                  break
+                end
+              end
 
               local max_cand_script = (LB64.max_candidates or 6)
               if NL then max_cand_script = math.min(max_cand_script, 4) end
 
               local cands = extract_b64_candidates(normalized_script, max_cand_script)
+
+              -- v3.1: Split Payload virtual base64 als Kandidat dazu nehmen
+              if vlist and type(vlist) == "table" and #vlist > 0 then
+                for _, vb in ipairs(vlist) do
+                  if type(vb) == "string" then
+                    local nb = normalize_b64(vb)
+                    if is_frag_base64ish(nb) then
+                      cands[#cands + 1] = nb
+                    end
+                  end
+                end
+                reasons["virtual_b64_from_split"] = true
+              end
+
               if #cands == 0 then break end
 
               local total_b64_len = 0
@@ -1400,7 +1567,7 @@ local function detect_html_smuggling_payload(task)
               local joined_len = 0
 
               for _, cand in ipairs(cands) do
-                local cleaned = cand:gsub("%s+", "")
+                local cleaned = tostring(cand):gsub("%s+", "")
                 total_b64_len = total_b64_len + #cleaned
 
                 if #joined < (LB64.join_max_parts or 5) and joined_len < (LB64.join_max_len or 180000) then
@@ -1474,7 +1641,7 @@ local function detect_html_smuggling_payload(task)
   end
 
   -- =========================
-  -- Combos und Scoring Stages (Fix v2.9-r1)
+  -- Combos und Scoring Stages
   -- =========================
   local combo_soft = 0.0
   local combo_hard = 0.0
@@ -1524,10 +1691,10 @@ local function detect_html_smuggling_payload(task)
     combo_hard = combo_hard + 2.0
   end
 
-  -- Stage 1: raw (ohne combos)
+  -- Stage 1: raw
   local raw_score = score
 
-  -- Stage 2: combos drauf
+  -- Stage 2: combos
   if combo_soft > 0 then
     score = score + (combo_soft * heur_mul)
     reasons["combo_soft"] = true
@@ -1552,7 +1719,7 @@ local function detect_html_smuggling_payload(task)
   end
   local after_floor = score
 
-  -- Stage 5: auth mul optional
+  -- Stage 5: auth mul
   local auth_mul = 1.0
   if AUTH_MUL_ENABLED then
     if task:get_symbol("R_DKIM_ALLOW") then auth_mul = auth_mul * 0.7 end
@@ -1565,7 +1732,7 @@ local function detect_html_smuggling_payload(task)
   local final_score = score
 
   -- =========================
-  -- Marker
+  -- Marker (kritisch)
   -- =========================
   if critical_kind == "PE" then
     task:insert_result("HTML_SMUGGLING_CRITICAL_PE", 1.0)
@@ -1630,17 +1797,17 @@ local function detect_html_smuggling_payload(task)
       ))
     end
 
-    -- Extended Logging
+    local dur_ms = (rspamd_util.get_ticks() - t_start) / 1000.0
+
     if (FORCE_EXTENDED_LOG and final_score >= FORCE_EXTENDED_LOG_MIN_SCORE) or (final_score >= LOG_SCORE_THRESHOLD) or DEBUG then
-      log_detection_extended(task, final_score, critical_kind, NL, NL_reason, reasons, external_scripts)
+      log_detection_extended(task, final_score, critical_kind, NL, NL_reason, reasons, external_scripts, dur_ms)
     end
 
-    -- Simple Line optional
     if (final_score >= LOG_SCORE_THRESHOLD or DEBUG) and LOG_SIMPLE_LINE then
       local from = task:get_from_addr()
       local from_s = from and from:to_string() or "unknown"
       local line = string.format(
-        "HTML_SMUGGLING %s || score=%.2f || critical=%s || NL=%s(%s) || heur_mul=%.2f || deep_scan=%s || reasons=%s || external=%s || from=%s || subject=%s",
+        "HTML_SMUGGLING %s || score=%.2f || critical=%s || NL=%s(%s) || heur_mul=%.2f || deep_scan=%s || reasons=%s || external=%s || from=%s || subject=%s || dur_ms=%.2f",
         VERSION,
         tonumber(final_score) or 0,
         safe_str(critical_kind, "none"),
@@ -1651,16 +1818,20 @@ local function detect_html_smuggling_payload(task)
         why_s,
         safe_str(table.concat(external_scripts, ","), ""),
         safe_str(from_s, "unknown"),
-        safe_str(task:get_subject() or "", "")
+        safe_str(task:get_subject() or "", ""),
+        tonumber(dur_ms) or 0
       )
       rspamd_logger.infox(task, line)
     end
-  end
 
-  if DEBUG and t0 then
-    local elapsed = os.clock() - t0
-    if elapsed > 0.01 then
-      rspamd_logger.infox(task, string.format("SLOW_HTML_SCAN version=%s time_ms=%.3f", VERSION, elapsed * 1000))
+    if dur_ms >= SLOW_LOG_MS then
+      rspamd_logger.infox(task, string.format(
+        "HTML_SMUGGLING_SLOW || v=%s || dur_ms=%.2f || len_html=%d || reasons=%s",
+        VERSION,
+        tonumber(dur_ms) or 0,
+        0,
+        why_s
+      ))
     end
   end
 end
@@ -1690,6 +1861,7 @@ if ENABLED then
   end
 
   reg_marker("HTML_SMUGGLING_TEST",                  "HTML smuggling test mode marker")
+
   reg_marker("HTML_SMUGGLING_CRITICAL_PE",           "HTML smuggling decoded PE payload")
   reg_marker("HTML_SMUGGLING_CRITICAL_WASM",         "HTML smuggling decoded WebAssembly module")
   reg_marker("HTML_SMUGGLING_CRITICAL_APPINSTALLER", "HTML smuggling decoded AppInstaller XML")
@@ -1704,4 +1876,10 @@ if ENABLED then
   reg_marker("HTML_SMUGGLING_CRITICAL_CAB",          "HTML smuggling decoded CAB archive")
   reg_marker("HTML_SMUGGLING_CRITICAL_7ZIP",         "HTML smuggling decoded 7ZIP archive")
   reg_marker("HTML_SMUGGLING_CRITICAL_RAR",          "HTML smuggling decoded RAR archive")
+
+  -- v3.1 Sichtbarkeits Marker (auch ohne dec)
+  reg_marker("HTML_SMUGGLING_MARKER_SERVICEWORKER", "HTML smuggling marker: ServiceWorker usage")
+  reg_marker("HTML_SMUGGLING_MARKER_WEBCRYPTO",     "HTML smuggling marker: WebCrypto usage")
+  reg_marker("HTML_SMUGGLING_MARKER_QR_CANVAS",     "HTML smuggling marker: QR Canvas hybrid usage")
+  reg_marker("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", "HTML smuggling marker: split base64 payload pattern")
 end
