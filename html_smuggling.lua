@@ -1803,14 +1803,16 @@ end
 -- Register symbols
 -- =========================
 if ENABLED then
-  local smuggling_id = rspamd_config:register_symbol{
-    name = "HTML_SMUGGLING_PAYLOAD",
-    callback = detect_html_smuggling_payload,
-    score = 0.0,
-    group = "phishing",
-    type = "callback",
-    description = "Detect HTML smuggling and decoded payload indicators (" .. VERSION .. ")"
-  }
+    -- Hauptsymbol mit dynamischem Score
+    local smuggling_id = rspamd_config:register_symbol{
+        name = "HTML_SMUGGLING_PAYLOAD",
+        callback = detect_html_smuggling_payload,
+        score = 1.0,       
+        flags = "dynamic",   
+        group = "phishing",
+        type = "callback",
+        description = "Detect HTML smuggling and decoded payload indicators (" .. VERSION .. ")"
+    }
 
   local function reg_marker(name, desc)
     rspamd_config:register_symbol{
