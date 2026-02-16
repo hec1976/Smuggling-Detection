@@ -474,7 +474,7 @@ end
 -- Newsletter Detection
 -- =========================
 local function is_newsletter(task)
-  local h = task:get_header("X-HEC-MailClass") or task:get_header("X-HEC-Category") or task:get_header("X-FortiMail-Profile")
+  local h = task:get_header("X-HEC-MailClass") or task:get_header("X-HEC-Category")
   if h then
     local hl = tostring(h):lower()
     if hl:find("newsletter", 1, true) or hl:find("marketing", 1, true) or hl:find("bulk", 1, true) then
