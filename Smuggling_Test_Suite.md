@@ -1,48 +1,59 @@
-# HTML Smuggling Test Suite – Laboratory Cases
+# HTML Smuggling Test Suite - Laboratory Cases
 
-Diese Testsuite validiert die **Rspamd HTML Smuggling Detection Suite
-(v3.1)**.
+Diese Testsuite validiert die Rspamd HTML Smuggling Detection (v3.2). Ziel ist eine reproduzierbare Abdeckung moderner HTML Smuggling Techniken inklusive Split Payloads, Obfuscation und API Kombinationen.
 
-------------------------------------------------------------------------
+## Aktuelle Test Matrix
 
-##  Aktuelle Test-Matrix (ENTHALTEN)
+Hinweise
+- Erwartete Symbole sind die Kern Signale. Je nach Lua Logik koennen zusaetzliche Symbole erscheinen (z. B. combos, sniff_decoded, critical_boost_reason).
+- Erwarteter Score ist als Bereich definiert, weil Combos, Critical Boost und Heuristiken (Newsletter, Auth Multiplikator) den Endscore beeinflussen.
 
-| Test | Fokus-Technik | Erwartete Symbole | Erwarteter Score |
-|------|---------------|-------------------|------------------|
-| test01 | Basis atob + Blob + PE | atob, blob, createObjectURL, dec_pe | 15-20 |
-| test02 | Split Payload (+= Concatenation) | atob, blob, createObjectURL, dec_pe | 20-25 |
-| test03 | Array.join() Payload | atob, blob, createObjectURL, array_index_api | 20-25 |
-| test04 | Polymorphe Obfuscation | atob, blob, polymorphic_obfuscation | 25-30 |
-| test05 | ZIP Archive Smuggling | atob, blob, dec_zip | 12-18 |
-| test06 | WebAssembly Module | atob, blob, wasm_uint8array | 15-20 |
-| test07 | PDF Document Smuggling | atob, blob, dec_pdf | 4-8 |
-| test08 | Web Worker + PE | webworker_api, blob, uint8array, atob | 18-24 |
-| test09 | Delayed Execution (setTimeout) | delayed_execution, atob, blob | 20-26 |
-| test10 | ms-appinstaller Schema | ms_appinstaller_uri, dec_xml_appinstaller | 8-12 |
-| test11 | Iframe + data: URI | iframe_src, data_uri | 4-8 |
-| test12 | External Script Loading | script_src_external | 1-3 |
-| test13 | Fetch API + Blob | fetch, blob, createObjectURL | 16-22 |
-| test14 | Canvas QR Code Lure | qr_canvas_or_svg, event_handler_api | 17-23 |
-| test15 | ServiceWorker Persistence | serviceworker_api, cache_api | 18-24 |
-| test16 | WebCrypto + PE | webcrypto_api, aes_decrypt, high_entropy | 17-23 |
-| test17 | Uint8Array Direct | uint8array, blob, dec_pe | 20-28 |
-| test18 | ALL-IN-ONE Maximum | alle Symbole kombiniert | 35-45 |
-| test19 | NEGATIVE: Legitime Website | keine (heur_mul reduziert) | 0-2 |
-| test20 | NEGATIVE: Newsletter | keine (Tracking only) | 0-1 |
-
----
-
-
-
+| Test | Datei | Fokus Technik | Erwartete Symbole (Kern) | Erwarteter Score |
+|---:|---|---|---|---:|
+| 01 | `test01_basic_pe_smuggling.html` | Basis atob plus Blob plus PE | `atob`, `blob`, `createObjectURL`, `dec_pe` | 15 bis 20 |
+| 02 | `test02_split_payload_pe.html` | Split Payload per `+=` | `split_payload`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 20 bis 26 |
+| 03 | `test03_array_join_pe.html` | Split Payload per `Array.join()` | `split_payload`, `array_join_api`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 20 bis 27 |
+| 04 | `test04_obfuscated_pe.html` | Polymorphe Obfuscation plus PE | `polymorphic_obfuscation`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 25 bis 32 |
+| 05 | `test05_zip_smuggling.html` | ZIP Archive Smuggling | `atob`, `blob`, `createObjectURL`, `dec_zip` | 12 bis 18 |
+| 06 | `test06_wasm_smuggling.html` | WASM Modul plus WebAssembly API | `atob`, `blob`, `createObjectURL`, `wasm_api`, `dec_wasm` | 15 bis 22 |
+| 07 | `test07_pdf_smuggling.html` | PDF Smuggling (window.open) | `atob`, `blob`, `createObjectURL`, `dec_pdf` | 4 bis 9 |
+| 08 | `test08_webworker_pe.html` | Web Worker plus PE | `webworker_api`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 18 bis 26 |
+| 09 | `test09_delayed_execution_pe.html` | Delayed Execution (setTimeout) | `delayed_execution`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 20 bis 28 |
+| 10 | `test10_appinstaller_schema.html` | ms appinstaller Schema plus XML | `ms_appinstaller_uri`, `dec_xml_appinstaller` | 8 bis 13 |
+| 11 | `test11_iframe_data_uri.html` | Iframe plus data URI | `iframe_src`, `data_uri` | 4 bis 9 |
+| 12 | `test12_external_scripts.html` | External Script Loading | `script_src_external` | 1 bis 4 |
+| 13 | `test13_fetch_api_pe.html` | Fetch API plus Blob | `fetch_api`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 16 bis 24 |
+| 14 | `test14_qr_canvas_pe.html` | Canvas Lure plus Click Handler | `canvas_api`, `event_handler_api`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 17 bis 25 |
+| 15 | `test15_serviceworker_pe.html` | ServiceWorker Persistenz | `serviceworker_api`, `cache_api`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 18 bis 26 |
+| 16 | `test16_webcrypto_pe.html` | WebCrypto API (simuliert) | `webcrypto_api`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 17 bis 24 |
+| 17 | `test17_uint8array_pe.html` | Uint8Array Direct plus Blob | `uint8array_api`, `blob`, `createObjectURL`, `dec_pe` | 20 bis 30 |
+| 18 | `test18_all_in_one_MAXIMUM.html` | ALL IN ONE Maximum | viele kombiniert plus `combos` plus `critical_boost` | 35 bis 50 |
+| 19 | `test19_NEGATIVE_legitimate.html` | NEGATIVE legitime Website | ideal: keine oder nur Low Signal | 0 bis 2 |
+| 20 | `test20_NEGATIVE_newsletter.html` | NEGATIVE Newsletter Tracking | ideal: keine oder nur Tracking | 0 bis 1 |
 
 ## Ziel der Suite
 
--   Validierung der Symbol-Abdeckung  
--   Identifikation von False-Negatives  
--   Belastungstest der Kombinations-Logik  
--   Vorbereitung auf moderne Stage- und OAuth-basierte Angriffsmuster
+- Validierung der Symbol Abdeckung
+- Identifikation von False Negatives
+- Belastungstest der Kombinations Logik (Combos)
+- Regression Tests bei Lua Aenderungen (v3.x)
 
-------------------------------------------------------------------------
+## Ausfuehrung
 
-**Version:** Laboratory Edition v1.4  
-**Engine Target:** Rspamd HTML Smuggling Detection v2.9-r1
+PowerShell
+- Erstlauf: `./create_realistic_test_suite.ps1`
+- Neu generieren oder ueberschreiben: `./create_realistic_test_suite.ps1 -Force`
+
+Output Ordner: `HTML_Smuggling_TestSuite_REALISTIC`
+
+## Scoring Logik (Kurz)
+
+Der Endscore setzt sich typischerweise zusammen aus
+1. Raw Symbol Weights (Decoder, APIs, dec_ Erkennung)
+2. Combos, wenn typische Smuggling Ketten auftreten (z. B. atob plus Blob plus createObjectURL)
+3. Critical Boost, wenn ein harter Payload erkannt wird (z. B. PE, LNK, MSIX, ISO, WASM)
+4. Optionaler Min Score Floor
+5. Heuristiken, z. B. Newsletter Reduktion und optional SPF DKIM Multiplikator
+
+Version: Laboratory Edition v1.5  
+Engine Target: Rspamd HTML Smuggling Detection v3.2
