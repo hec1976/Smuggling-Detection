@@ -86,7 +86,7 @@ html_smuggling {
 ## Neu in Version 3.2 gegenüber v2.9
 *   [x] **MSIX/APPX Support:** Vollständige Analyse moderner Windows-App-Installer.
 *   [x] **WASM Detection:** Erkennt WebAssembly-Module, die oft für In-Browser-Exploits genutzt werden.
-*   [x] **Smart Text Scan:** Reduziert die Last durch intelligentes Chunking großer HTML-Dateien.
+*   [x] **Smart Text Scan:** Reduziert die Last durch intelligentes Chunking grosser HTML-Dateien.
 *   [x] **Individual Sniffing:** Verhindert Fehlalarme durch zufällig zusammengesetzte Base64-Ketten.
 
 **Version:** 3.2 (Februar 2026)  
