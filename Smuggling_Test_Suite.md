@@ -9,7 +9,7 @@ Hinweise
 - Erwarteter Score ist als Bereich definiert, weil Combos, Critical Boost und Heuristiken (Newsletter, Auth Multiplikator) den Endscore beeinflussen.
 
 | Test | Datei | Fokus Technik | Erwartete Symbole (Kern) |
-|---:|---|---|---:|
+|---:|---|---|---|
 | 01 | `test01_basic_pe_smuggling.html` | Basis atob plus Blob plus PE | `atob`, `blob`, `createObjectURL`, `dec_pe` | 
 | 02 | `test02_split_payload_pe.html` | Split Payload per `+=` | `split_payload`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 
 | 03 | `test03_array_join_pe.html` | Split Payload per `Array.join()` | `split_payload`, `array_join_api`, `atob`, `blob`, `createObjectURL`, `dec_pe` | 
