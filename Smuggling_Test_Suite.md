@@ -6,7 +6,7 @@ Diese Testsuite validiert die Rspamd HTML Smuggling Detection (v3.2). Ziel ist e
 
 Hinweise
 - Erwartete Symbole sind die Kern Signale. Je nach Lua Logik koennen zusaetzliche Symbole erscheinen (z. B. combos, sniff_decoded, critical_boost_reason).
-- Erwarteter Score ist als Bereich definiert, weil Combos, Critical Boost und Heuristiken (Newsletter, Auth Multiplikator) den Endscore beeinflussen.
+
 
 | Test | Datei | Fokus Technik | Erwartete Symbole (Kern) |
 |---:|---|---|---|
