@@ -11,8 +11,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   REALISTIC HTML Smuggling Test Suite v1.0                ║" -ForegroundColor Cyan
-Write-Host "║   Optimiert fuer Rspamd HTML Smuggling Detection v3.2     ║" -ForegroundColor Cyan
+Write-Host "║   REALISTIC HTML Smuggling Test Suite v1.0                 ║" -ForegroundColor Cyan
+Write-Host "║   Optimiert fuer Rspamd HTML Smuggling Detection v3.2      ║" -ForegroundColor Cyan
 Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
@@ -959,7 +959,7 @@ foreach ($file in $testFiles) {
 
 Write-Host ""
 Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║                    ABGESCHLOSSEN                        ║" -ForegroundColor Cyan
+Write-Host "║                    ABGESCHLOSSEN                           ║" -ForegroundColor Cyan
 Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
 Write-Host "║  Ordner: $testFolder" -ForegroundColor White
 Write-Host "║  Erfolgreich: $successCount von $($testFiles.Count)" -ForegroundColor Green
