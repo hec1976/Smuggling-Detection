@@ -937,7 +937,7 @@ foreach ($file in $testFiles) {
       [System.Text.UTF8Encoding]::new($false)
     )
 
-    Write-Host "✅ $($file.Name)" -ForegroundColor Green
+    Write-Host "   $($file.Name)" -ForegroundColor Green
     Write-Host "   Expected Score: $($file.ExpectedScore) | Detection: $($file.ExpectedDetection)" -ForegroundColor Gray
     Write-Host "   $($file.Description)" -ForegroundColor DarkGray
     
@@ -951,7 +951,7 @@ foreach ($file in $testFiles) {
     $successCount++
   }
   catch {
-    Write-Host "❌ Fehler bei $($file.Name): $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Fehler bei $($file.Name): $($_.Exception.Message)" -ForegroundColor Red
     $errorCount++
   }
 }
@@ -959,7 +959,7 @@ foreach ($file in $testFiles) {
 
 Write-Host ""
 Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║                    ✅ ABGESCHLOSSEN                        ║" -ForegroundColor Cyan
+Write-Host "║                    ABGESCHLOSSEN                        ║" -ForegroundColor Cyan
 Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
 Write-Host "║  Ordner: $testFolder" -ForegroundColor White
 Write-Host "║  Erfolgreich: $successCount von $($testFiles.Count)" -ForegroundColor Green
@@ -967,7 +967,7 @@ if ($errorCount -gt 0) {
   Write-Host "║  Fehler: $errorCount" -ForegroundColor Red
 }
 Write-Host "║" -ForegroundColor Cyan
-Write-Host "║  📊 Erwartete Detection-Rate: 90% (18/20 Tests)" -ForegroundColor Yellow
+Write-Host "║  Erwartete Detection-Rate: 90% (18/20 Tests)" -ForegroundColor Yellow
 Write-Host "║" -ForegroundColor Cyan
 Write-Host "║  Pfad: $((Get-Location).Path)\$testFolder" -ForegroundColor Gray
 Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
