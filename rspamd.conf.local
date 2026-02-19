@@ -109,7 +109,7 @@ html_smuggling {
     # OBFUSCATION DETECTION LIMITS
     # --------------------------------------------------------------------------
     obfus {
-      min_frag_len = 4;                     # Min. Fragment-Länge für B64 (4 default) ⚠️ WICHTIG!
+      min_frag_len = 4;                     # Min. Fragment-Länge für B64 (4 default)
       virtual_trigger_len = 80;             # Länge für virtuelle Payloads (120 default)
       virtual_max_payloads = 8;             # Max. virtuelle Payloads (3 default)
       resolve_passes = 12;                  # Auflösungs-Durchläufe (8 default)
@@ -198,7 +198,7 @@ html_smuggling {
     # --------------------------------------------------------------------------
     # DEKODIERTE PAYLOADS (F = FEST, NICHT mit heur_mul multipliziert!)
     # --------------------------------------------------------------------------
-    dec_pe = 10.0;                          # (F) PE/EXE/DLL (8.0 default) ⚠️ KRITISCH
+    dec_pe = 10.0;                          # (F) PE/EXE/DLL (8.0 default) 
     dec_zip = 7.0;                          # (F) ZIP Archiv (5.0 default)
     dec_msix = 8.0;                         # (F) MSIX Package (6.0 default)
     dec_appx = 8.0;                         # (F) APPX Package (6.0 default)
@@ -216,7 +216,7 @@ html_smuggling {
     dec_lnk = 8.0;                          # (F) LNK Shortcut (5.0 default)
     dec_script = 6.0;                       # (F) VBS/PS1/BAT (4.0 default)
     dec_bin = 0.5;                          # (F) Binary unbekannt (0.2 default)
-    dec_wasm = 9.0;                         # (F) WebAssembly (8.0 default) ⚠️ KRITISCH
+    dec_wasm = 9.0;                         # (F) WebAssembly (8.0 default)
 
     # --------------------------------------------------------------------------
     # UINT8ARRAY SPEZIAL (F = FEST, NICHT mit heur_mul multipliziert!)
