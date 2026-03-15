@@ -1,16 +1,13 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v3.2
--- Fokus: saubere Scoring Stages, kein goto, pcall Safety
--- v3.2 Aenderungen:
--- 1) Einzel Sniffing pro Base64 Kandidat (kein Datenmuell durch Join Decode)
--- 2) Split Payload Power: Deobfuscate liefert virtuelle Kandidaten als Liste, werden sofort gescannt
--- 3) Fragment Support: min_frag_len Default = 4 (p += "TVqQ" wird erfasst)
--- 4) Speed: decode nur auf relevante Kandidaten, harter Stop bei PE
+-- HTML Smuggling Detection v3.3
+-- Gehärtete Komplettversion
+-- Fokus: saubere Scoring Stages, reduzierte False Positives, starkes Decode Gate,
+-- deduplizierte Kandidaten, datenschutzfreundlicheres Logging, Score Caps
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
 
-local VERSION = "3.2"
+local VERSION = "3.3"
 
 -- =========================
 -- Config lesen
@@ -38,6 +35,15 @@ local DEEP_SCAN_NEWSLETTER_HEADER = (CFG.deep_scan_newsletter_header ~= false)
 local MIN_SCORE           = tonumber(CFG.min_score) or 0.0
 local CRITICAL_BOOST      = tonumber(CFG.critical_boost) or 0.0
 local AUTH_MUL_ENABLED    = (CFG.auth_mul_enabled == true)
+
+-- v3.3 Härtungen
+local MAX_FINAL_SCORE                     = tonumber(CFG.max_final_score) or 15.0
+local REDACT_LOG_FIELDS                   = (CFG.redact_log_fields ~= false)
+local REQUIRE_SCRIPT_CONTEXT_FOR_EXTERNAL = (CFG.require_script_context_for_external ~= false)
+local REQUIRE_STRONG_GATE_FOR_DECODE      = (CFG.require_strong_gate_for_decode ~= false)
+local TRUSTED_AUTH_STRONG_REDUCTION       = tonumber(CFG.trusted_auth_strong_reduction) or 0.15
+local MAX_EXTERNAL_REPORTED               = tonumber(CFG.max_external_reported) or 3
+local SOFT_ONLY_SCORE_CAP                 = tonumber(CFG.soft_only_score_cap) or 4.5
 
 -- Multiplikatoren
 local HEUR_MUL_DEFAULT            = tonumber(CFG.heur_mul_default) or 1.0
@@ -80,7 +86,7 @@ local LIMITS = {
     deobfus_timeout_ms = 50.0,
   },
   obfus = {
-    min_frag_len = 4, -- v3.2: Fragment Support
+    min_frag_len = 4,
     virtual_trigger_len = 120,
     virtual_max_payloads = 3,
     resolve_passes = 8,
@@ -295,6 +301,15 @@ if CFG.unsafe_script_domains_map and type(CFG.unsafe_script_domains_map) == "str
   }
 end
 
+local SAFE_DKIM_DOMAINS_MAP = nil
+if CFG.safe_dkim_domains_map and type(CFG.safe_dkim_domains_map) == "string" then
+  SAFE_DKIM_DOMAINS_MAP = rspamd_config:add_map{
+    url = CFG.safe_dkim_domains_map,
+    type = "set",
+    description = "html_smuggling safe dkim domains map"
+  }
+end
+
 -- =========================
 -- Helper
 -- =========================
@@ -333,8 +348,10 @@ local function normalize_b64(s)
   local t = (s or ""):gsub("%s+", "")
   t = t:gsub("%-", "+"):gsub("_", "/")
   local mod = #t % 4
-  if mod == 2 then t = t .. "=="
-  elseif mod == 3 then t = t .. "="
+  if mod == 2 then
+    t = t .. "=="
+  elseif mod == 3 then
+    t = t .. "="
   end
   return t
 end
@@ -382,98 +399,62 @@ local function smart_text_scan(s, chunk)
   return table.concat(parts, "\n")
 end
 
--- =========================
--- Entropy
--- =========================
-local function calculate_entropy(s)
-  if not s or #s == 0 then return 0 end
-  local maxb = tonumber(LOBFUS.max_entropy_check_bytes) or 4096
-  if #s > maxb then s = s:sub(1, maxb) end
-
-  local freq = {}
-  for i = 1, #s do
-    local c = s:sub(i,i)
-    freq[c] = (freq[c] or 0) + 1
-  end
-
-  local entropy = 0
-  local len = #s
-  for _, count in pairs(freq) do
-    local p = count / len
-    if p > 0 then
-      entropy = entropy - (p * math.log(p) / math.log(2))
-    end
-  end
-  return entropy
+local function redact_value(s, keep)
+  s = safe_str(s, "none")
+  if not REDACT_LOG_FIELDS then return s end
+  keep = tonumber(keep) or 3
+  if #s <= keep then return string.rep("*", #s) end
+  return s:sub(1, keep) .. string.rep("*", math.max(3, #s - keep))
 end
 
--- =========================
--- Extended Logging (1 String, mit dur_ms)
--- =========================
-local function log_detection_extended(task, score, critical_kind, NL, NL_reason, reasons, external_scripts, dur_ms)
-  local why = table_keys_sorted(reasons)
-  local from = task:get_from_addr()
-  local from_s = from and from:to_string() or "unknown"
-
-  local ext_s = "none"
-  if external_scripts and #external_scripts > 0 then
-    ext_s = table.concat(external_scripts, "|")
-  end
-
-  local to = task:get_recipients('smtp')
-  local to_s = "unknown"
-  if to and to[1] then
-    local a = to[1].addr
-    if type(a) == "string" then
-      to_s = a
-    elseif a and a.to_string then
-      local ok, s = pcall(function() return a:to_string() end)
-      to_s = (ok and s) or tostring(a) or "unknown"
-    else
-      to_s = tostring(a) or "unknown"
+local function dedupe_list_limit(items, max_items)
+  local out = {}
+  local seen = {}
+  max_items = tonumber(max_items) or 10
+  for _, v in ipairs(items or {}) do
+    local k = tostring(v)
+    if not seen[k] then
+      seen[k] = true
+      out[#out + 1] = v
+      if #out >= max_items then break end
     end
   end
-
-  local ip = task:get_from_ip()
-  local ip_s = ip and tostring(ip) or "unknown"
-
-  local msgid = task:get_message_id() or "none"
-  local subj = task:get_subject() or "none"
-
-  if subj and #subj > 160 then subj = subj:sub(1,160) end
-  if msgid and #msgid > 160 then msgid = msgid:sub(1,160) end
-
-  local auth_status = {}
-  if task:get_symbol("R_DKIM_ALLOW") then auth_status[#auth_status + 1] = "DKIM_OK" end
-  if task:get_symbol("R_DKIM_REJECT") then auth_status[#auth_status + 1] = "DKIM_FAIL" end
-  if task:get_symbol("R_SPF_ALLOW") then auth_status[#auth_status + 1] = "SPF_OK" end
-  if task:get_symbol("R_SPF_FAIL") then auth_status[#auth_status + 1] = "SPF_FAIL" end
-  local auth_s = #auth_status > 0 and table.concat(auth_status, ",") or "none"
-
-  local line = string.format(
-    "HTML_SMUGGLING_DETECTION || version=%s || score=%.2f || critical=%s || newsletter=%s || nl_reason=%s || reasons=%s || external_scripts=%s || from=%s || to=%s || ip=%s || msgid=%s || subject=%s || auth=%s || dur_ms=%.2f || ts=%d",
-    VERSION,
-    tonumber(score) or 0,
-    safe_str(critical_kind, "none"),
-    safe_str(NL, "false"),
-    safe_str(NL_reason, "none"),
-    table.concat(why, ","),
-    safe_str(ext_s, "none"),
-    safe_str(from_s, "unknown"),
-    safe_str(to_s, "unknown"),
-    safe_str(ip_s, "unknown"),
-    safe_str(msgid, "none"),
-    safe_str(subj, "none"),
-    safe_str(auth_s, "none"),
-    tonumber(dur_ms) or 0,
-    os.time()
-  )
-  rspamd_logger.infox(task, line)
+  return out
 end
 
--- =========================
--- URL Host und Maps
--- =========================
+local function get_from_domain_safe(task)
+  if task and task.get_from_domain then
+    local ok, v = pcall(function() return task:get_from_domain() end)
+    if ok and v then return tostring(v):lower() end
+  end
+  return ""
+end
+
+local function get_dkim_domain_safe(task)
+  if not task then return "" end
+
+  local hdr = task:get_header("DKIM-Signature")
+  if not hdr then return "" end
+
+  local d = tostring(hdr):match("[;,%s]d=([^;%s]+)")
+  if d then return tostring(d):lower() end
+  return ""
+end
+
+local function domains_relaxed_align(a, b)
+  a = trim((a or ""):lower())
+  b = trim((b or ""):lower())
+  if a == "" or b == "" then return false end
+  if a == b then return true end
+
+  local bpat = "%." .. b:gsub("%.", "%%.") .. "$"
+  local apat = "%." .. a:gsub("%.", "%%.") .. "$"
+
+  if a:match(bpat) then return true end
+  if b:match(apat) then return true end
+  return false
+end
+
 local function host_from_url(u)
   if not u or u == "" then return nil end
   local s = tostring(u):lower()
@@ -496,10 +477,180 @@ local function map_has_domain(map, host)
   return false
 end
 
+local function is_safe_dkim_domain(task)
+  if not SAFE_DKIM_DOMAINS_MAP then return false end
+  local d = get_dkim_domain_safe(task)
+  if d == "" then return false end
+  return map_has_domain(SAFE_DKIM_DOMAINS_MAP, d)
+end
+
+local function has_good_auth_alignment(task)
+  local from_d = get_from_domain_safe(task)
+  local dkim_d = get_dkim_domain_safe(task)
+
+  local dkim_ok = task:get_symbol("R_DKIM_ALLOW") and true or false
+  local spf_ok  = task:get_symbol("R_SPF_ALLOW") and true or false
+
+  if dkim_ok and dkim_d ~= "" and domains_relaxed_align(from_d, dkim_d) then
+    return true
+  end
+
+  if spf_ok and from_d ~= "" then
+    return true
+  end
+
+  return false
+end
+
+local function looks_like_tracking_or_inline_b64(s)
+  if not s then return false end
+  local l = (s or ""):lower()
+
+  if l:find("^data:image/", 1, false) then return true end
+  if l:find("^data:font/", 1, false) then return true end
+  if l:find("^data:text/css", 1, false) then return true end
+
+  if l:find("goog", 1, true) or l:find("google", 1, true) then return true end
+  if l:find("analytics", 1, true) or l:find("tracking", 1, true) then return true end
+  if l:find("pixel", 1, true) or l:find("beacon", 1, true) then return true end
+
+  return false
+end
+
+-- =========================
+-- Entropy
+-- =========================
+local function calculate_entropy(s)
+  if not s or #s == 0 then return 0 end
+  local maxb = tonumber(LOBFUS.max_entropy_check_bytes) or 4096
+  if #s > maxb then s = s:sub(1, maxb) end
+
+  local freq = {}
+  for i = 1, #s do
+    local c = s:sub(i, i)
+    freq[c] = (freq[c] or 0) + 1
+  end
+
+  local entropy = 0
+  local len = #s
+  for _, count in pairs(freq) do
+    local p = count / len
+    if p > 0 then
+      entropy = entropy - (p * math.log(p) / math.log(2))
+    end
+  end
+  return entropy
+end
+
+local function base64_quality_score(s)
+  if not s then return 0 end
+  local t = (s or ""):gsub("%s+", "")
+  if #t < 40 then return 0 end
+
+  local score = 0
+  if t:find("[+/=]") then score = score + 1 end
+  if #t >= (LB64.min_len or 200) then score = score + 1 end
+
+  local ent = calculate_entropy(t)
+  if ent >= 4.2 then score = score + 1 end
+  if ent >= 4.8 then score = score + 1 end
+
+  if t:match("^[A-Za-z0-9%+/_%%-]+=*$") then
+    score = score + 1
+  end
+
+  return score
+end
+
+local function is_hard_reason_present(reasons)
+  return reasons["dec_pe"]
+      or reasons["dec_wasm"]
+      or reasons["dec_msix"]
+      or reasons["dec_appx"]
+      or reasons["dec_iso"]
+      or reasons["dec_lnk"]
+      or reasons["dec_ole"]
+      or reasons["dec_vhdx"]
+      or reasons["dec_script"]
+      or reasons["ms_appinstaller_uri"]
+      or reasons["dec_xml_appinstaller"]
+      or reasons["uint8array_payload"]
+end
+
+-- =========================
+-- Extended Logging
+-- =========================
+local function log_detection_extended(task, score, critical_kind, NL, NL_reason, reasons, external_scripts, dur_ms)
+  local why = table_keys_sorted(reasons)
+
+  local from = task:get_from_addr()
+  local from_s = from and from:to_string() or "unknown"
+
+  local ext_s = "none"
+  if external_scripts and #external_scripts > 0 then
+    ext_s = table.concat(dedupe_list_limit(external_scripts, MAX_EXTERNAL_REPORTED), "|")
+  end
+
+  local to = task:get_recipients("smtp")
+  local to_s = "unknown"
+  if to and to[1] then
+    local a = to[1].addr
+    if type(a) == "string" then
+      to_s = a
+    elseif a and a.to_string then
+      local ok, s = pcall(function() return a:to_string() end)
+      to_s = (ok and s) or tostring(a) or "unknown"
+    else
+      to_s = tostring(a) or "unknown"
+    end
+  end
+
+  local ip = task:get_from_ip()
+  local ip_s = ip and tostring(ip) or "unknown"
+
+  local msgid = task:get_message_id() or "none"
+  local subj = task:get_subject() or "none"
+
+  if subj and #subj > 160 then subj = subj:sub(1, 160) end
+  if msgid and #msgid > 160 then msgid = msgid:sub(1, 160) end
+
+  local auth_status = {}
+  if task:get_symbol("R_DKIM_ALLOW") then auth_status[#auth_status + 1] = "DKIM_OK" end
+  if task:get_symbol("R_DKIM_REJECT") then auth_status[#auth_status + 1] = "DKIM_FAIL" end
+  if task:get_symbol("R_SPF_ALLOW") then auth_status[#auth_status + 1] = "SPF_OK" end
+  if task:get_symbol("R_SPF_FAIL") then auth_status[#auth_status + 1] = "SPF_FAIL" end
+  local auth_s = #auth_status > 0 and table.concat(auth_status, ",") or "none"
+
+  local line = string.format(
+    "HTML_SMUGGLING_DETECTION || version=%s || score=%.2f || critical=%s || newsletter=%s || nl_reason=%s || reasons=%s || external_scripts=%s || from=%s || to=%s || ip=%s || msgid=%s || subject=%s || auth=%s || dur_ms=%.2f || ts=%d",
+    VERSION,
+    tonumber(score) or 0,
+    safe_str(critical_kind, "none"),
+    safe_str(NL, "false"),
+    safe_str(NL_reason, "none"),
+    table.concat(why, ","),
+    redact_value(ext_s, 12),
+    redact_value(from_s, 5),
+    redact_value(to_s, 5),
+    redact_value(ip_s, 4),
+    redact_value(msgid, 8),
+    redact_value(subj, 16),
+    safe_str(auth_s, "none"),
+    tonumber(dur_ms) or 0,
+    os.time()
+  )
+  rspamd_logger.infox(task, line)
+end
+
+-- =========================
+-- Safe Script Domains
+-- =========================
 local function is_safe_script_domain(u)
   if not u or u == "" then return false end
   local s = tostring(u):lower()
-  if s:match("^javascript:") or s:match("^data:") or s:match("^file:") then return false end
+  if s:match("^javascript:") or s:match("^data:") or s:match("^file:") or s:match("^cid:") then
+    return false
+  end
 
   local host = host_from_url(u)
   if not host then return false end
@@ -557,23 +708,39 @@ local function is_trusted_newsletter_sender(task)
 end
 
 local function compute_heur_mul(task, NL, NL_reason)
-  if not NL then return HEUR_MUL_DEFAULT end
-  if is_trusted_newsletter_sender(task) then return HEUR_MUL_TRUSTED_NEWSLETTER end
-  if NL_reason == "header" then return HEUR_MUL_NEWSLETTER_HEADER end
+  if not NL then
+    return HEUR_MUL_DEFAULT
+  end
+
+  if is_trusted_newsletter_sender(task) then
+    if has_good_auth_alignment(task) or is_safe_dkim_domain(task) then
+      return math.min(HEUR_MUL_TRUSTED_NEWSLETTER, TRUSTED_AUTH_STRONG_REDUCTION)
+    end
+    return HEUR_MUL_TRUSTED_NEWSLETTER
+  end
+
+  if NL_reason == "header" then
+    return HEUR_MUL_NEWSLETTER_HEADER
+  end
+
   return HEUR_MUL_NEWSLETTER_HEUR
 end
 
 -- =========================
--- Base64 Candidates (mit kleinem Time Budget)
+-- Base64 Candidates
 -- =========================
 local function extract_b64_candidates(text, max_candidates_override)
   local candidates = {}
   local seen = {}
 
-  if not text or #text < (LB64.min_len or 200) then return candidates end
+  if not text or #text < (LB64.min_len or 200) then
+    return candidates
+  end
 
   local max_in = tonumber(LB64.max_scan_bytes) or (tonumber(LSCAN.max_bytes) * 2)
-  if #text > max_in then text = text:sub(1, max_in) end
+  if #text > max_in then
+    text = text:sub(1, max_in)
+  end
 
   local max_cand = max_candidates_override or (LB64.max_candidates or 6)
   local pat = "[A-Za-z0-9%+/_%%-]{" .. tostring(LB64.min_len or 200) .. ",}={0,2}"
@@ -583,18 +750,25 @@ local function extract_b64_candidates(text, max_candidates_override)
 
   for m in text:gmatch(pat) do
     iter_count = iter_count + 1
+
     if (iter_count % 80 == 0) then
       local dt_ms = (rspamd_util.get_ticks() - start_time) / 1000.0
       if dt_ms > 25.0 then break end
     end
+
     if #candidates >= max_cand then break end
 
-    local nb = normalize_b64(m)
+    local raw = tostring(m or "")
+    local nb = normalize_b64(raw)
+
     if is_base64ish(nb) then
-      local h = rspamd_util.str_hash(nb)
-      if not seen[h] then
-        seen[h] = true
-        candidates[#candidates + 1] = nb
+      local q = base64_quality_score(nb)
+      if q >= 3 and not looks_like_tracking_or_inline_b64(raw) then
+        local h = rspamd_util.str_hash(nb)
+        if not seen[h] then
+          seen[h] = true
+          candidates[#candidates + 1] = nb
+        end
       end
     end
   end
@@ -603,7 +777,7 @@ local function extract_b64_candidates(text, max_candidates_override)
 end
 
 -- =========================
--- Deobfuscation v3.2 (Rueckgabe: clean, virtuals_table, timeout_flag)
+-- Deobfuscation
 -- =========================
 local function advanced_deobfuscate(script, timeout_ms)
   if not script or #script < 30 then return script, {}, 0 end
@@ -973,19 +1147,19 @@ local function detect_uint8array_payload(script)
         local header = table.concat(header_bytes)
 
         if #header >= 4 then
-          if header:sub(1,4) == "\000asm" then
+          if header:sub(1, 4) == "\000asm" then
             score = W.wasm_uint8array
             critical = "WASM"
             reasons[#reasons + 1] = "wasm_uint8array"
-          elseif header:sub(1,2) == "MZ" then
+          elseif header:sub(1, 2) == "MZ" then
             score = W.pe_uint8array
             critical = "PE"
             reasons[#reasons + 1] = "pe_uint8array"
-          elseif header:sub(1,4) == "PK\003\004" then
+          elseif header:sub(1, 4) == "PK\003\004" then
             score = W.dec_zip
             critical = "ZIP"
             reasons[#reasons + 1] = "zip_uint8array"
-          elseif header:sub(1,5) == "%PDF-" then
+          elseif header:sub(1, 5) == "%PDF-" then
             score = W.dec_pdf
             reasons[#reasons + 1] = "pdf_uint8array"
           else
@@ -1015,7 +1189,7 @@ local function detect_split_payload(html)
   local vars = {}
 
   local function scan_decl(keyword)
-    for varname, value in html:gmatch("[\n;%s]" .. keyword .. "%s+(%w+)%s*=%s*['\"]([A-Za-z0-9%+/_%%-=%s]{"..minf..",})['\"]") do
+    for varname, value in html:gmatch("[\n;%s]" .. keyword .. "%s+(%w+)%s*=%s*['\"]([A-Za-z0-9%+/_%%-=%s]{" .. minf .. ",})['\"]") do
       value = (value or ""):gsub("%s+", "")
       if is_frag_base64ish(value) and not vars[varname] then
         vars[varname] = true
@@ -1041,22 +1215,40 @@ local function detect_external_scripts(html)
   local unsafe = {}
   if not html then return all, unsafe end
 
+  local seen_all = {}
+  local seen_unsafe = {}
+
   for script_url in html:gmatch('<script[^>]*src=["\'](.-)["\'][^>]*>') do
-    if #all >= (LSCRIPT.max_external or 5) then break end
-    all[#all + 1] = script_url
-    if not is_safe_script_domain(script_url) then
-      unsafe[#unsafe + 1] = script_url
+    local u = trim(script_url or "")
+    local ul = u:lower()
+
+    if u ~= "" and not seen_all[u] then
+      seen_all[u] = true
+
+      if ul:match("^https?://") or ul:match("^//") then
+        if #all < (LSCRIPT.max_external or 5) then
+          all[#all + 1] = u
+        end
+
+        if not is_safe_script_domain(u) and not seen_unsafe[u] then
+          seen_unsafe[u] = true
+          unsafe[#unsafe + 1] = u
+        end
+      end
     end
   end
 
   if html:find("createElement%(%s*['\"]script['\"]%)", 1, false) then
     if #all < (LSCRIPT.max_external or 5) then
       all[#all + 1] = "dynamic_script_creation"
+    end
+    if not seen_unsafe["dynamic_script_creation"] then
+      seen_unsafe["dynamic_script_creation"] = true
       unsafe[#unsafe + 1] = "dynamic_script_creation"
     end
   end
 
-  return all, unsafe
+  return dedupe_list_limit(all, LSCRIPT.max_external or 5), dedupe_list_limit(unsafe, LSCRIPT.max_external or 5)
 end
 
 local function has_obfuscated_api_call(lc)
@@ -1113,14 +1305,14 @@ end
 -- =========================
 local function le_u32(s, off)
   if not s or #s < off + 3 then return nil end
-  local b1, b2, b3, b4 = s:byte(off, off+3)
+  local b1, b2, b3, b4 = s:byte(off, off + 3)
   if not b1 then return nil end
   return b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
 end
 
 local function le_u16(s, off)
   if not s or #s < off + 1 then return nil end
-  local b1, b2 = s:byte(off, off+1)
+  local b1, b2 = s:byte(off, off + 1)
   if not b1 then return nil end
   return b1 + (b2 * 256)
 end
@@ -1128,14 +1320,14 @@ end
 local function is_valid_pe(bin)
   local ok, res = pcall(function()
     if not bin or #bin < 256 then return false end
-    if bin:sub(1,2) ~= "MZ" then return false end
+    if bin:sub(1, 2) ~= "MZ" then return false end
 
     local e_lfanew = le_u32(bin, 0x3C + 1)
     if not e_lfanew then return false end
     if e_lfanew < 0x40 or e_lfanew > (#bin - 256) then return false end
 
     local pe_off = e_lfanew + 1
-    if bin:sub(pe_off, pe_off+3) ~= "PE\000\000" then return false end
+    if bin:sub(pe_off, pe_off + 3) ~= "PE\000\000" then return false end
 
     local machine = le_u16(bin, pe_off + 4)
     if not machine then return false end
@@ -1157,11 +1349,11 @@ local function sniff_decoded(bin)
     if not bin or #bin < 16 then return nil end
 
     if is_valid_pe(bin) then return "PE" end
-    if bin:sub(1,4) == "MSCF" then return "CAB" end
-    if bin:sub(1,6) == "7z\xBC\xAF\x27\x1C" then return "7ZIP" end
-    if bin:sub(1,6) == "Rar!\x1A\x07" then return "RAR" end
+    if bin:sub(1, 4) == "MSCF" then return "CAB" end
+    if bin:sub(1, 6) == "7z\xBC\xAF\x27\x1C" then return "7ZIP" end
+    if bin:sub(1, 6) == "Rar!\x1A\x07" then return "RAR" end
 
-    if bin:sub(1,4) == "PK\003\004" or bin:sub(1,4) == "PK\005\006" then
+    if bin:sub(1, 4) == "PK\003\004" or bin:sub(1, 4) == "PK\005\006" then
       local head = bin:sub(1, 200000)
       if head:find("AppxManifest%.xml", 1, true) or head:find("AppxBlockMap%.xml", 1, true) or head:find("AppxSignature%.p7x", 1, true) or head:find("AppxMetadata/", 1, true) then
         if head:find("AppxManifest%.xml", 1, true) then return "APPX" end
@@ -1170,9 +1362,9 @@ local function sniff_decoded(bin)
       return "ZIP"
     end
 
-    if bin:sub(1,5) == "%PDF-" then return "PDF" end
-    if bin:sub(1,8) == "\208\207\017\224\161\177\026\225" then return "OLE" end
-    if bin:sub(1,8) == "vhdxfile" then return "VHDX" end
+    if bin:sub(1, 5) == "%PDF-" then return "PDF" end
+    if bin:sub(1, 8) == "\208\207\017\224\161\177\026\225" then return "OLE" end
+    if bin:sub(1, 8) == "vhdxfile" then return "VHDX" end
 
     if #bin >= 0x8001 + 5 and bin:sub(0x8001 + 1, 0x8001 + 5) == "CD001" then
       return "ISO"
@@ -1180,17 +1372,17 @@ local function sniff_decoded(bin)
       return "ISO"
     end
 
-    if bin:sub(1,4) == "\076\000\000\000" then
-      local h = bin:sub(1,64)
+    if bin:sub(1, 4) == "\076\000\000\000" then
+      local h = bin:sub(1, 64)
       if h:find("\001\020\002\000\000\000\000\000\192\000\000\000\000\000\000\070", 1, true) then
         return "LNK"
       end
     end
 
-    if bin:sub(1,4) == "\000asm" then return "WASM" end
-    if bin:sub(1,8) == "\000asm\001\000\000\000" then return "WASM" end
+    if bin:sub(1, 4) == "\000asm" then return "WASM" end
+    if bin:sub(1, 8) == "\000asm\001\000\000\000" then return "WASM" end
 
-    local head = bin:sub(1,4096)
+    local head = bin:sub(1, 4096)
     local l = head:lower()
 
     if l:find("<?xml", 1, true) or l:find("<appinstaller", 1, true) then return "XML" end
@@ -1273,7 +1465,7 @@ local function part_is_htmlish(p)
 end
 
 -- =========================
--- Main Detection v3.2
+-- Main Detection
 -- =========================
 local function detect_html_smuggling_payload(task)
   if not ENABLED then return end
@@ -1290,10 +1482,15 @@ local function detect_html_smuggling_payload(task)
 
   local NL, NL_reason = is_newsletter(task)
   local heur_mul = compute_heur_mul(task, NL, NL_reason)
+  local trusted_auth = has_good_auth_alignment(task)
+  local trusted_news = is_trusted_newsletter_sender(task)
 
   local deep_scan = true
   if NL and NL_reason == "header" and (not DEEP_SCAN_NEWSLETTER_HEADER) then
     deep_scan = false
+  end
+  if trusted_news and trusted_auth then
+    deep_scan = true
   end
 
   local function add(points, why, is_decode_or_hard)
@@ -1413,12 +1610,21 @@ local function detect_html_smuggling_payload(task)
         if has_smuggling_api then
           local all_ext, unsafe_ext = detect_external_scripts(html)
           if all_ext and #all_ext > 0 then
-            for _,u in ipairs(all_ext) do
+            for _, u in ipairs(all_ext) do
               if #external_scripts < (LSCRIPT.max_external or 5) then
                 external_scripts[#external_scripts + 1] = u
               end
             end
-            if unsafe_ext and #unsafe_ext > 0 then
+
+            local should_score_external = true
+            if REQUIRE_SCRIPT_CONTEXT_FOR_EXTERNAL then
+              should_score_external =
+                has("atob") or has("atob_obfuscated") or has("obfus_api") or
+                has("split_payload") or has("delayed_execution") or
+                has("ms_appinstaller_uri") or has("appinstaller_file")
+            end
+
+            if should_score_external and unsafe_ext and #unsafe_ext > 0 then
               add(W.external_script * #unsafe_ext, "external_scripts", false)
             end
           end
@@ -1486,7 +1692,6 @@ local function detect_html_smuggling_payload(task)
               local normalized_script = sscan:gsub('"%s*%+%s*"', "")
               normalized_script = normalized_script:gsub("'%s*%+%s*'", "")
 
-              -- v3.2: Deobfuscate liefert virtuelle Kandidaten als Liste
               local virtuals = {}
               if maybe_concat or maybe_obfus then
                 local deob, vlist, tflag = advanced_deobfuscate(normalized_script, LSCRIPT.deobfus_timeout_ms)
@@ -1502,12 +1707,16 @@ local function detect_html_smuggling_payload(task)
 
               local cands = extract_b64_candidates(normalized_script, max_cand_script)
 
-              -- v3.2: virtuelle Kandidaten (Split Payload Power)
               if virtuals and #virtuals > 0 then
+                local seen_v = {}
                 for _, v in ipairs(virtuals) do
                   local vv = (v or ""):gsub("%s+", "")
                   if is_frag_base64ish(vv) then
-                    cands[#cands + 1] = vv
+                    local hv = rspamd_util.str_hash(vv)
+                    if not seen_v[hv] then
+                      seen_v[hv] = true
+                      cands[#cands + 1] = vv
+                    end
                   end
                 end
                 reasons["virtual_b64_candidates"] = true
@@ -1515,7 +1724,6 @@ local function detect_html_smuggling_payload(task)
 
               if not cands or #cands == 0 then break end
 
-              -- Gesamtindikatoren bleiben sinnvoll
               local total_b64_len = 0
               for _, cand in ipairs(cands) do
                 total_b64_len = total_b64_len + #(tostring(cand):gsub("%s+", ""))
@@ -1525,10 +1733,27 @@ local function detect_html_smuggling_payload(task)
               if total_b64_len >= b64_huge_thr then add(W.b64_total_len_huge, "b64_total_len_huge", false) end
               if #cands > 1 then add(W.b64_joined_parts, "b64_joined_parts", false) end
 
-              -- Gate: erst ab genug Material decoden
-              if total_b64_len < min_decode_total then break end
+              if total_b64_len < min_decode_total then
+                break
+              end
 
-              -- v3.2: Einzel Sniffing pro Kandidat, Stop bei PE
+              if REQUIRE_STRONG_GATE_FOR_DECODE then
+                local strong_gate =
+                  has("atob") or
+                  has("atob_obfuscated") or
+                  has("obfus_api") or
+                  has("split_payload") or
+                  has("delayed_execution") or
+                  has("ms_appinstaller_uri") or
+                  has("appinstaller_file") or
+                  has("uint8array_payload")
+
+                if not strong_gate then
+                  reasons["decode_gate_not_strong_enough"] = true
+                  break
+                end
+              end
+
               for _, cand in ipairs(cands) do
                 local nb = normalize_b64(cand)
                 if nb and #nb >= 40 then
@@ -1537,41 +1762,55 @@ local function detect_html_smuggling_payload(task)
                     local kind = sniff_decoded(decoded)
 
                     if kind == "PE" then
-                      add(W.dec_pe, "dec_pe", true); critical_kind = "PE"
+                      add(W.dec_pe, "dec_pe", true)
+                      critical_kind = "PE"
                       reasons["single_sniff_pe"] = true
                       break
                     elseif kind == "WASM" then
-                      add(W.dec_wasm, "dec_wasm", true); if not critical_kind then critical_kind = "WASM" end
+                      add(W.dec_wasm, "dec_wasm", true)
+                      if not critical_kind then critical_kind = "WASM" end
                     elseif kind == "XML" then
                       if has("ms_appinstaller_uri") or has("appinstaller_file") then
-                        add(W.dec_xml_appinstaller, "dec_xml_appinstaller", true); critical_kind = "XML_APPINSTALLER"
+                        add(W.dec_xml_appinstaller, "dec_xml_appinstaller", true)
+                        critical_kind = "XML_APPINSTALLER"
                       else
                         add(W.dec_xml, "dec_xml", true)
                       end
                     elseif kind == "VHDX" then
-                      add(W.dec_vhdx, "dec_vhdx", true); critical_kind = "VHDX"
+                      add(W.dec_vhdx, "dec_vhdx", true)
+                      critical_kind = "VHDX"
                     elseif kind == "ISO" then
-                      add(W.dec_iso, "dec_iso", true); critical_kind = "ISO"
+                      add(W.dec_iso, "dec_iso", true)
+                      critical_kind = "ISO"
                     elseif kind == "LNK" then
-                      add(W.dec_lnk, "dec_lnk", true); critical_kind = "LNK"
+                      add(W.dec_lnk, "dec_lnk", true)
+                      critical_kind = "LNK"
                     elseif kind == "OLE" then
-                      add(W.dec_ole, "dec_ole", true); critical_kind = "OLE"
+                      add(W.dec_ole, "dec_ole", true)
+                      critical_kind = "OLE"
                     elseif kind == "MSIX" then
-                      add(W.dec_msix, "dec_msix", true); critical_kind = "MSIX"
+                      add(W.dec_msix, "dec_msix", true)
+                      critical_kind = "MSIX"
                     elseif kind == "APPX" then
-                      add(W.dec_appx, "dec_appx", true); critical_kind = "APPX"
+                      add(W.dec_appx, "dec_appx", true)
+                      critical_kind = "APPX"
                     elseif kind == "CAB" then
-                      add(W.dec_cab, "dec_cab", true); critical_kind = "CAB"
+                      add(W.dec_cab, "dec_cab", true)
+                      critical_kind = "CAB"
                     elseif kind == "7ZIP" then
-                      add(W.dec_7zip, "dec_7zip", true); critical_kind = "7ZIP"
+                      add(W.dec_7zip, "dec_7zip", true)
+                      critical_kind = "7ZIP"
                     elseif kind == "RAR" then
-                      add(W.dec_rar, "dec_rar", true); critical_kind = "RAR"
+                      add(W.dec_rar, "dec_rar", true)
+                      critical_kind = "RAR"
                     elseif kind == "ZIP" then
-                      add(W.dec_zip, "dec_zip", true); if not critical_kind then critical_kind = "ZIP" end
+                      add(W.dec_zip, "dec_zip", true)
+                      if not critical_kind then critical_kind = "ZIP" end
                     elseif kind == "PDF" then
                       add(W.dec_pdf, "dec_pdf", true)
                     elseif kind == "VBS" or kind == "PS1" or kind == "BAT" then
-                      add(W.dec_script, "dec_script", true); critical_kind = "SCRIPT"
+                      add(W.dec_script, "dec_script", true)
+                      critical_kind = "SCRIPT"
                     elseif kind == "JS" then
                       add(W.dec_js, "dec_js", true)
                     elseif kind == "HTML" then
@@ -1607,6 +1846,7 @@ local function detect_html_smuggling_payload(task)
     reasons["obfus_api"] or reasons["array_index_atob"] or reasons["eval_call"] or
     reasons["atob"] or reasons["atob_obfuscated"]
   )
+
   local has_api_pair = ((reasons["createObjectURL"] and reasons["blob"]) or (reasons["createObjectURL"] and reasons["fetch"]) or (reasons["blob"] and reasons["fetch"]))
   if has_api_pair then combo_soft = combo_soft + W.combo_smuggling_api end
 
@@ -1673,12 +1913,30 @@ local function detect_html_smuggling_payload(task)
 
   local auth_mul = 1.0
   if AUTH_MUL_ENABLED then
-    if task:get_symbol("R_DKIM_ALLOW") then auth_mul = auth_mul * 0.7 end
-    if task:get_symbol("R_SPF_ALLOW") then auth_mul = auth_mul * 0.8 end
-    if task:get_symbol("R_DKIM_REJECT") or task:get_symbol("R_SPF_FAIL") then auth_mul = auth_mul * 1.5 end
+    if task:get_symbol("R_DKIM_ALLOW") then auth_mul = auth_mul * 0.75 end
+    if task:get_symbol("R_SPF_ALLOW") then auth_mul = auth_mul * 0.85 end
+
+    if task:get_symbol("R_DKIM_REJECT") then auth_mul = auth_mul * 1.35 end
+    if task:get_symbol("R_SPF_FAIL") then auth_mul = auth_mul * 1.25 end
+
+    if trusted_news and trusted_auth and not is_hard_reason_present(reasons) then
+      auth_mul = auth_mul * TRUSTED_AUTH_STRONG_REDUCTION
+      reasons["trusted_auth_reduction"] = true
+    end
+
     score = score * auth_mul
   end
   local after_auth = score
+
+  if not is_hard_reason_present(reasons) and score > SOFT_ONLY_SCORE_CAP then
+    score = SOFT_ONLY_SCORE_CAP
+    reasons["soft_only_cap"] = true
+  end
+
+  if score > MAX_FINAL_SCORE then
+    score = MAX_FINAL_SCORE
+    reasons["max_final_score"] = true
+  end
 
   local final_score = score
 
@@ -1696,6 +1954,9 @@ local function detect_html_smuggling_payload(task)
   end
   if reasons["split_payload"] then
     task:insert_result("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", 1.0)
+  end
+  if reasons["trusted_auth_reduction"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_TRUSTED_REDUCTION", 1.0)
   end
 
   if critical_kind == "PE" then
@@ -1780,9 +2041,9 @@ local function detect_html_smuggling_payload(task)
         tonumber(heur_mul) or 1.0,
         safe_str(deep_scan, "true"),
         why_s,
-        safe_str(table.concat(external_scripts, ","), ""),
-        safe_str(from_s, "unknown"),
-        safe_str(task:get_subject() or "", ""),
+        safe_str(table.concat(dedupe_list_limit(external_scripts, MAX_EXTERNAL_REPORTED), ","), ""),
+        redact_value(from_s, 5),
+        redact_value(task:get_subject() or "", 16),
         tonumber(dur_ms) or 0
       )
       rspamd_logger.infox(task, line)
@@ -1803,16 +2064,15 @@ end
 -- Register symbols
 -- =========================
 if ENABLED then
-    -- Hauptsymbol mit dynamischem Score
-    local smuggling_id = rspamd_config:register_symbol{
-        name = "HTML_SMUGGLING_PAYLOAD",
-        callback = detect_html_smuggling_payload,
-        score = 1.0,       
-        flags = "dynamic",   
-        group = "phishing",
-        type = "callback",
-        description = "Detect HTML smuggling and decoded payload indicators (" .. VERSION .. ")"
-    }
+  local smuggling_id = rspamd_config:register_symbol{
+    name = "HTML_SMUGGLING_PAYLOAD",
+    callback = detect_html_smuggling_payload,
+    score = 1.0,
+    flags = "dynamic",
+    group = "phishing",
+    type = "callback",
+    description = "Detect HTML smuggling and decoded payload indicators (" .. VERSION .. ")"
+  }
 
   local function reg_marker(name, desc)
     rspamd_config:register_symbol{
@@ -1830,6 +2090,7 @@ if ENABLED then
   reg_marker("HTML_SMUGGLING_MARKER_WEBCRYPTO",      "HTML smuggling marker: WebCrypto API usage")
   reg_marker("HTML_SMUGGLING_MARKER_QR_CANVAS",      "HTML smuggling marker: QR or Canvas lure usage")
   reg_marker("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD",  "HTML smuggling marker: split payload construction detected")
+  reg_marker("HTML_SMUGGLING_MARKER_TRUSTED_REDUCTION", "HTML smuggling marker: trusted sender and auth reduction applied")
 
   reg_marker("HTML_SMUGGLING_CRITICAL_PE",           "HTML smuggling decoded PE payload")
   reg_marker("HTML_SMUGGLING_CRITICAL_WASM",         "HTML smuggling decoded WebAssembly module")
