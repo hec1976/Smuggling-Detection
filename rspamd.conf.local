@@ -1,247 +1,29 @@
-HTML Smuggling Detection v3.2 - Production Configuration
-# ============================================================================
-# Diese Config enthält NUR Optionen, die im Lua-Code tatsächlich implementiert sind!
-# Alle nicht funktionierenden Optionen wurden entfernt.
-# ============================================================================
-
 html_smuggling {
-  # ============================================================================
-  # GRUNDEINSTELLUNGEN
-  # ============================================================================
-  
-  enabled = true;                           # Modul aktiviert
-  debug = false;                            # Debug-Logging (sehr verbose!)
-  score_debug = true;                       # Scoring-Stages loggen
-  test_mode = false;                        # Test-Mode (nutzt HTML_SMUGGLING_TEST Symbol)
+  enabled = true;
+  debug = false;
+  test_mode = false;
 
-  # ============================================================================
-  # SCORING STEUERUNG
-  # ============================================================================
-  
-  min_score = 3.0;                          # Mindest-Score für Symbol-Erzeugung
-  critical_boost = 5.0;                     # Zusätz. Boost bei kritischen Payloads (PE, WASM, etc.)
-  auth_mul_enabled = false;                 # Auth-Multiplikator (DKIM/SPF) deaktiviert
+  score_debug = false;
+  log_simple_line = true;
+  log_score_threshold = 6.0;
+  slow_log_ms = 150.0;
 
-  # ============================================================================
-  # LOGGING KONFIGURATION
-  # ============================================================================
-  
-  log_score_threshold = 5.0;                # Ab diesem Score: extended Log
-  force_extended_log = true;                # Extended Log erzwingen
-  force_extended_log_min_score = 1.5;       # Min. Score für forced extended Log
-  log_simple_line = true;                   # Zusätzliche kurze Log-Zeile
-  slow_log_ms = 200.0;                      # Warnung bei langsamen Scans (>200ms)
+  deep_scan_newsletter_header = false;
 
-  # ============================================================================
-  # NEWSLETTER HANDLING
-  # ============================================================================
-  # Newsletter werden automatisch erkannt und weniger streng bewertet
-  
-  deep_scan_newsletter_header = false;      # Newsletter mit Header-Markierung nicht tief scannen
-  
-  # Multiplikatoren für heuristische Scores:
-  heur_mul_default = 1.0;                   # Standard-Multiplikator
-  heur_mul_newsletter_header = 0.2;         # Newsletter (erkannt per Header)
-  heur_mul_newsletter_heuristic = 0.3;      # Newsletter (heuristisch erkannt)
-  heur_mul_trusted_newsletter = 0.1;        # Vertrauenswürdige Newsletter-Domains
+  auth_mul_enabled = true;
+  critical_boost = 1.5;
+  min_score = 0.0;
+  max_final_score = 14.0;
 
-  # ============================================================================
-  # DOMAIN MAPS
-  # ============================================================================
-  # Optional: Maps für Domain-Bewertung
-  
-  safe_script_domains_map = "file:///etc/rspamd/maps.d/10_allow/safe_script_domains_smuggling.map";
-  trusted_newsletter_domains_map = "file:///etc/rspamd/maps.d/10_allow/trusted_newsletter_domains_smuggling.map";
-  unsafe_script_domains_map = "file:///etc/rspamd/maps.d/30_block/unsafe_script_domains_smuggling.map";
+  redact_log_fields = true;
+  require_script_context_for_external = true;
+  require_strong_gate_for_decode = true;
+  trusted_auth_strong_reduction = 0.15;
+  max_external_reported = 3;
+  soft_only_score_cap = 4.5;
 
-  # ============================================================================
-  # LIMITS - Ressourcen-Beschränkungen
-  # ============================================================================
-  
-  limits {
-    # --------------------------------------------------------------------------
-    # SCAN LIMITS - Allgemeine Scan-Grenzen
-    # --------------------------------------------------------------------------
-    scan {
-      max_bytes = 300000;                   # Max. 300KB HTML scannen (200000 default)
-      smart_chunk = 50000;                  # Chunk-Größe für intelligentes Scannen (50000 default)
-    }
-
-    # --------------------------------------------------------------------------
-    # BASE64 EXTRACTION LIMITS
-    # --------------------------------------------------------------------------
-    b64 {
-      min_len = 150;                        # Minimale Base64-Länge (200 default)
-      max_candidates = 8;                   # Max. Base64-Kandidaten (6 default)
-      max_scan_bytes = 500000;              # Max. Bytes für B64-Suche (500KB default)
-      min_decode_total = 400;               # Min. Gesamt-Länge vor Decode (1500 default)
-      big_threshold = 4000;                 # "Groß" ab diesem Wert (5000 default)
-      huge_threshold = 15000;               # "Riesig" ab diesem Wert (20000 default)
-      join_max_parts = 10;                  # Max. Teile für Join (5 default)
-      join_max_len = 200000;                # Max. Länge nach Join (180000 default)
-    }
-
-    # --------------------------------------------------------------------------
-    # DECODE LIMITS
-    # --------------------------------------------------------------------------
-    decode {
-      max_bytes = 200000;                   # Max. Bytes pro Decode (160KB default)
-      joined_len_mul = 2;                   # Multiplikator für Join-Decode (2 default)
-    }
-
-    # --------------------------------------------------------------------------
-    # SCRIPT ANALYSIS LIMITS
-    # --------------------------------------------------------------------------
-    script {
-      max_check = 8;                        # Max. Scripts prüfen (3 default)
-      max_external = 8;                     # Max. externe Scripts (5 default)
-      max_vars = 50;                        # Max. Variablen tracken (20 default)
-      
-      smart_chunk = 30000;                  # Chunk-Größe für Script-Scan (20000 default)
-      max_script_len = 150000;              # Max. Script-Länge (80000 default)
-      max_total_script_scan = 200000;       # Max. Gesamt-Script-Scan (120000 default)
-      max_script_time_ms = 200.0;           # Max. Zeit pro Script (80ms default)
-      
-      deobfus_timeout_ms = 100.0;           # Timeout für Deobfuskation (50ms default)
-    }
-
-    # --------------------------------------------------------------------------
-    # OBFUSCATION DETECTION LIMITS
-    # --------------------------------------------------------------------------
-    obfus {
-      min_frag_len = 4;                     # Min. Fragment-Länge für B64 (4 default)
-      virtual_trigger_len = 80;             # Länge für virtuelle Payloads (120 default)
-      virtual_max_payloads = 8;             # Max. virtuelle Payloads (3 default)
-      resolve_passes = 12;                  # Auflösungs-Durchläufe (8 default)
-      
-      max_uint8array_bytes = 8192;          # Max. Bytes für Uint8Array-Check (2048 default)
-      max_entropy_check_bytes = 16000;      # Max. Bytes für Entropy (4096 default)
-      css_max_style_size = 20000;           # Max. Style-Größe (10000 default)
-      max_delayed_exec_context = 1000;      # Kontext für setTimeout (500 default)
-    }
-  }
-
-  # ============================================================================
-  # WEIGHTS - Gewichtung der Detektions-Indikatoren
-  # ============================================================================
-  # WICHTIG: Scores mit (H) werden mit heur_mul multipliziert
-  #          Scores mit (F) sind FEST und werden NICHT multipliziert
-  
-  weights {
-    # --------------------------------------------------------------------------
-    # BASIS-APIs (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    atob = 0.3;                             # (H) atob() API (0.2 default)
-    blob = 0.3;                             # (H) Blob() API (0.2 default)
-    createobjecturl = 0.5;                  # (H) createObjectURL() (0.3 default)
-    data_uri = 0.2;                         # (H) data: URIs (0.1 default)
-    iframe_src = 0.3;                       # (H) iframe mit src (0.2 default)
-    fetch = 0.2;                            # (H) fetch() API (0.1 default)
-    filereader = 0.2;                       # (H) FileReader API (0.1 default)
-    uint8array = 0.3;                       # (H) Uint8Array (0.1 default)
-
-    # --------------------------------------------------------------------------
-    # FORTGESCHRITTENE APIS (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    array_index_api = 0.4;                  # (H) window['atob'] etc. (0.3 default)
-    function_constructor = 0.5;             # (H) new Function() (0.4 default)
-    eval_api = 0.5;                         # (H) eval() (0.3 default)
-    settimeout_api = 0.4;                   # (H) setTimeout/setInterval (0.3 default)
-    webworker_api = 0.6;                    # (H) Web Worker (0.5 default)
-    serviceworker_api = 0.7;                # (H) Service Worker (0.5 default)
-    webassembly_api = 0.8;                  # (H) WebAssembly (0.6 default)
-    webcrypto_api = 0.5;                    # (H) WebCrypto API (0.6 default)
-    canvas_qr_api = 0.5;                    # (H) Canvas/QR (0.6 default)
-
-    # --------------------------------------------------------------------------
-    # EVENT HANDLERS (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    event_handler = 0.4;                    # (H) onclick="..." etc. (0.3 default)
-
-    # --------------------------------------------------------------------------
-    # SPLIT-PAYLOAD DETECTION (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    split_payload = 2.0;                    # (H) Split-Payload erkannt (1.0 default)
-    
-    # --------------------------------------------------------------------------
-    # EXTERNE SCRIPTS (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    external_script = 0.6;                  # (H) Externe Scripts (0.5 default)
-
-    # --------------------------------------------------------------------------
-    # OBFUSKATION (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    obfus = 1.0;                            # (H) Generische Obfuskation (0.8 default)
-    atob_obfuscated = 1.2;                  # (H) Obfuskierte atob-Aufrufe (1.2 default)
-    delayed_execution = 2.5;                # (H) Zeitverzögerte Ausführung (2.0 default)
-    polymorphic_obfuscation = 2.0;          # (H) Polymorpher Code (2.0 default)
-
-    # --------------------------------------------------------------------------
-    # MICROSOFT SPEZIAL (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    ms_appinstaller_uri = 4.0;              # (H) ms-appinstaller: URI (3.5 default)
-    appinstaller_file = 1.5;                # (H) .appinstaller Files (0.8 default)
-
-    # --------------------------------------------------------------------------
-    # HEX/ARRAYS (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    hex_array = 0.8;                        # (H) Hex-Arrays (0.8 default)
-
-    # --------------------------------------------------------------------------
-    # BASE64-GRÖSSE (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    b64_total_len_big = 0.8;                # (H) Große Base64 (0.6 default)
-    b64_total_len_huge = 1.5;               # (H) Riesige Base64 (1.2 default)
-    b64_joined_parts = 0.8;                 # (H) Mehrere B64-Teile (0.4 default)
-    b64_long_html = 0.5;                    # (H) Langes HTML mit B64 (0.4 default)
-
-    # --------------------------------------------------------------------------
-    # DEKODIERTE PAYLOADS (F = FEST, NICHT mit heur_mul multipliziert!)
-    # --------------------------------------------------------------------------
-    dec_pe = 10.0;                          # (F) PE/EXE/DLL (8.0 default) 
-    dec_zip = 7.0;                          # (F) ZIP Archiv (5.0 default)
-    dec_msix = 8.0;                         # (F) MSIX Package (6.0 default)
-    dec_appx = 8.0;                         # (F) APPX Package (6.0 default)
-    dec_cab = 6.0;                          # (F) CAB Archiv (4.0 default)
-    dec_7zip = 6.0;                         # (F) 7ZIP Archiv (4.0 default)
-    dec_rar = 6.0;                          # (F) RAR Archiv (4.0 default)
-    dec_pdf = 2.5;                          # (F) PDF Dokument (1.5 default)
-    dec_js = 3.0;                           # (F) JavaScript (2.5 default)
-    dec_html = 2.5;                         # (F) HTML (2.0 default)
-    dec_xml = 1.0;                          # (F) XML (0.6 default)
-    dec_xml_appinstaller = 4.0;             # (F) AppInstaller XML (3.0 default)
-    dec_ole = 4.0;                          # (F) OLE Container (3.0 default)
-    dec_vhdx = 8.0;                         # (F) VHDX (5.0 default)
-    dec_iso = 8.0;                          # (F) ISO Image (6.0 default)
-    dec_lnk = 8.0;                          # (F) LNK Shortcut (5.0 default)
-    dec_script = 6.0;                       # (F) VBS/PS1/BAT (4.0 default)
-    dec_bin = 0.5;                          # (F) Binary unbekannt (0.2 default)
-    dec_wasm = 9.0;                         # (F) WebAssembly (8.0 default)
-
-    # --------------------------------------------------------------------------
-    # UINT8ARRAY SPEZIAL (F = FEST, NICHT mit heur_mul multipliziert!)
-    # --------------------------------------------------------------------------
-    wasm_uint8array = 8.0;                  # (F) WASM in Uint8Array (8.0 default)
-    pe_uint8array = 10.0;                   # (F) PE in Uint8Array (10.0 default)
-    large_uint8array = 3.0;                 # (F) Große Uint8Arrays (3.0 default)
-
-    # --------------------------------------------------------------------------
-    # CSS EXFILTRATION (H = mit heur_mul multipliziert)
-    # --------------------------------------------------------------------------
-    css_exfiltration = 2.5;                 # (H) CSS Data Theft (2.5 default)
-
-    # --------------------------------------------------------------------------
-    # COMBO-SCORES (F = FEST, NICHT mit heur_mul multipliziert!)
-    # --------------------------------------------------------------------------
-    combo_smuggling_api = 3.0;              # (F) Blob + createObjectURL (2.0 default)
-    combo_atob_plus_b64 = 2.5;              # (F) atob + große B64 (2.0 default)
-    combo_msapp_plus_xml = 4.0;             # (F) appinstaller + XML (3.0 default)
-    combo_zip_plus_smuggling = 3.0;         # (F) ZIP + Smuggling (2.0 default)
-    combo_pe = 6.0;                         # (F) PE + Kontext (4.0 default)
-    combo_hex_plus_smuggling = 2.0;         # (F) Hex + Smuggling (1.5 default)
-    combo_container_plus_smuggling = 3.5;   # (F) Container + Smuggling (2.0 default)
-    combo_wasm_plus_smuggling = 4.0;        # (F) WASM + Smuggling (3.0 default)
-    combo_external_script = 2.0;            # (F) Externe Scripts + Smuggling (1.5 default)
-    combo_split_payload = 3.0;              # (F) Split + Payload (2.0 default)
-  }
+  heur_mul_default = 1.0;
+  heur_mul_newsletter_header = 0.20;
+  heur_mul_newsletter_heuristic = 0.35;
+  heur_mul_trusted_newsletter = 0.10;
 }
