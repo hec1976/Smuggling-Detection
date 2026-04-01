@@ -1,96 +1,90 @@
+# Rspamd HTML Smuggling Detection Suite (v3.3)
 
-# Rspamd HTML Smuggling Detection Suite (v3.2)
-
-![Version](https://img.shields.io/badge/Version-3.2-green)
+![Version](https://img.shields.io/badge/Version-3.3-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
-![Security](https://img.shields.io/badge/Focus-Fragment%20%26%20Split%20Payload-red)
+![Security](https://img.shields.io/badge/Focus-Hardened%20Gate%20%26%20Entropy-red)
 
 ## Einführung & Vision
-HTML Smuggling v3.2 ist eine hochperformante Sicherheits-Erweiterung für Rspamd, die speziell darauf ausgelegt ist, bösartige Payloads zu erkennen, die erst zur Laufzeit im Browser des Opfers zusammengesetzt werden. 
+HTML Smuggling v3.3 ist die konsequente Weiterentwicklung der Suite hin zu einer gehärteten Enterprise-Abwehrschicht. Während v3.2 die Deobfuskation perfektionierte, fokussiert sich v3.3 auf Präzision, Rauschunterdrückung und Performance-Härtung für Umgebungen mit extrem hohem Mailaufkommen .
 
-Die Version 3.2 markiert einen Meilenstein in der **Deobfuskations-Tiefe**. Während klassische Filter bei fragmentierten Variablen (Split-Payloads) versagen, rekonstruiert dieses Modul aktiv Programm-Logik, um versteckte Executables, Container und Skripte bereits im SMTP-Dialog zu enttarnen.
-
----
-
-## Technische Kern-Features (v3.2 Updates)
-
-### 1. Split Payload Power & Fragment Support
-Angreifer teilen Payloads oft in winzige Stücke auf (z.B. `var p = "TVqQ"; p += "AMAA";`), um statische Signatur-Scanner zu überlisten. 
-*   **Fragment-Erkennung:** Erfasst nun Fragmente ab einer Länge von nur 4 Zeichen (`min_frag_len`).
-*   **Virtuelle Kandidaten:** Das Modul führt eine interne Schatten-Rekonstruktion durch. Zusammengesetzte Variablen werden als "virtuelle Kandidaten" behandelt und sofort der Sniffing-Engine übergeben.
-
-### 2. Deep Payload Sniffing Engine (v3.2)
-Anstatt alle Base64-Strings blind zu verbinden (was zu "Datenmüll" führt), nutzt v3.2 ein **Einzel-Sniffing-Verfahren**:
-*   **Präzision:** Jeder Kandidat wird einzeln validiert. Ein Treffer führt zum sofortigen Abbruch des Scans (**Hard-Stop bei PE-Funden**) für maximale Performance.
-*   **Erweiterte Formate:** Erkennt nun zuverlässig:
-    *   **Container:** VHDX, ISO, LNK, OLE, ZIP, 7Z, RAR, CAB.
-    *   **Packages:** MSIX, APPX, AppInstaller-XML.
-    *   **Web-Technologien:** WebAssembly (`WASM`), JavaScript-Blobs.
-
-### 3. Advanced API Detection
-Die Suite überwacht moderne Browser-Schnittstellen, die häufig für Smuggling missbraucht werden:
-*   **ServiceWorker & WebWorker:** Erkennt Versuche, Downloads im Hintergrund-Thread zu verstecken.
-*   **WebCrypto & Canvas:** Identifiziert Verschlüsselung von Payloads oder das Verstecken von Code in Bilddaten (QR/Canvas).
-*   **Delayed Execution:** Analysiert `setTimeout`-Kontexte auf Smuggling-Absichten.
+Die Version 3.3 führt das Konzept des "Strong Decode Gate" ein: Rechenintensive Dekodierungs-Operationen werden nur noch eingeleitet, wenn der Skript-Kontext zweifelsfrei auf bösartige Smuggling-Techniken hinweist. In Kombination mit einer neuen Entropie-Analyse und Byte-Array-Sniffing (uint8array) erkennt v3.3 selbst polymorphe Malware, die klassische statische Muster komplett vermeidet.
 
 ---
 
-## Das 5-Stage Scoring-System
+## Technische Kern-Features (v3.3 Updates)
 
-Das Scoring wurde in v3.2 weiter verfeinert, um Fehlalarme (False Positives) bei Newslettern zu minimieren:
+### 1. Hardened Decode Gate & Context Validation
+Um die False-Positive-Rate bei komplexen, aber legitimen Web-Mails gegen Null zu senken, nutzt v3.3 ein zweistufiges Validierungsverfahren:
+* Strong Gate: Dekodierung findet nur statt, wenn "Smuggling-Werkzeuge" (wie atob, blob, fetch oder MS-AppInstaller) im selben Skript-Kontext aktiv sind.
+* Entropy-Check: Base64-Kandidaten werden vor der Dekodierung auf ihre Informationsdichte geprüft. Nur hochgradig strukturierte Daten (typisch für verschlüsselte oder binäre Payloads) werden weiterverarbeitet.
 
-1.  **Stage 1: Heuristische Basis:** Gewichtung von APIs (Blob, atob, fetch).
-2.  **Stage 2: Deobfuscation Boost:** Bonuspunkte für verschleierte Aufrufe (`window['atob']`) und rekonstruierte Fragmente.
-3.  **Stage 3: Critical Payload Marker:** Massive Aufwertung bei Fund von kritischen Dateitypen (z.B. PE innerhalb eines HTML-Blobs).
-4.  **Stage 4: Combo-Logik:** Synergie-Effekte (z.B. `Split-Payload` + `ZIP-Header` = Eskalation).
-5.  **Stage 5: Auth-Reputation:** Dynamische Anpassung des Scores basierend auf SPF/DKIM-Status. Ein valider DKIM-Eintrag kann den Score eines Newsletters dämpfen, während ein Auth-Fail den Score multipliziert.
+### 2. Uint8Array & Byte-Stream Sniffing (v3.3)
+Moderne Malware-Stämme nutzen oft keine reinen Base64-Strings mehr, sondern bauen Dateien über binäre Byte-Arrays zusammen:
+* Binary Reconstruction: v3.3 analysiert uint8array-Konstruktoren direkt im JavaScript-Code und erkennt darin versteckte Datenströme.
+* In-Memory Sniffing: Identifiziert binäre Signaturen (Magic Bytes) innerhalb von Byte-Arrays:
+    * WASM & PE: Erkennt WebAssembly-Module und Executables direkt in Array-Daten.
+    * Container: Identifiziert ZIP-Header, PDF-Signaturen und ISO-Fragmente innerhalb von Variablen-Konstrukten.
+
+### 3. Advanced API & Marker Suite
+Die Suite überwacht spezialisierte Browser-Schnittstellen und setzt interne Marker für das Rspamd-Scoring:
+* WebCrypto & ServiceWorker: Identifiziert Versuche, Payloads über die Crypto-API zu entschleiern oder persistente Hintergrund-Prozesse zur Infektion zu missbrauchen.
+* QR-Canvas Detection: Erkennt das "Zeichnen" von Malware-Code in unsichtbare HTML5-Canvas-Elemente (QR-Code-Lure).
+* Score Caps: Neue Sicherheits-Caps verhindern, dass rein heuristische Treffer ohne harten Payload-Fund (Soft-Only) kritische Schwellenwerte überschreiten.
 
 ---
 
-## Konfiguration & Maps
+## Das 5-Stage Scoring-System (v3.3)
 
-Das Modul ist hochgradig anpassbar über `/etc/rspamd/rspamd.conf.local`:
+1. Stage 1: Heuristik & API-Scan: Gewichtung von Basis-APIs mit Fokus auf Smuggling-Kontexte.
+2. Stage 2: Deobfuscation & Virtual Payloads: Rekonstruktion fragmentierter Strings (Split-Payloads).
+3. Stage 3: Deep Sniffing & Critical Boost: Sofortige Eskalation bei Fund von Binär-Signaturen (PE, VHDX, WASM).
+4. Stage 4: Combo- & Cross-Logik: Synergien zwischen verschiedenen Detektions-Vektoren.
+5. Stage 5: Trusted Auth Reduction: Validierte Newsletter (DKIM/SPF-Alignment) erhalten eine Score-Reduktion, sofern kein harter Payload-Fund vorliegt.
 
-```lua
+---
+
+## Konfiguration & Datenschutz
+
+Beispiel-Konfiguration für /etc/rspamd/local.d/html_smuggling.conf:
+
 html_smuggling {
   enabled = true;
-  debug = false;
-  
-  # Neue v3.2 Limits
+  max_final_score = 15.0;
+  soft_only_score_cap = 4.5;
+  redact_log_fields = true;
+  require_strong_gate_for_decode = true;
+
   limits {
     script {
-      max_script_time_ms = 80.0;     # Schutz vor ReDoS/Slow-Scripts
-      deobfus_timeout_ms = 50.0;     # Timeout für Variablen-Rekonstruktion
-    }
-    obfus {
-      min_frag_len = 4;              # Erkennt auch kleinste Code-Schnipsel
-      virtual_max_payloads = 3;      # Max. rekonstruierte Schatten-Variablen
+      max_total_script_scan = 120000;
+      max_script_time_ms = 80.0;
     }
   }
 
-  # Whitelisting & Trust
-  safe_script_domains_map = "/etc/rspamd/maps.d/safe_scripts.map";
-  trusted_newsletter_domains_map = "/etc/rspamd/maps.d/trusted_newsletters.map";
+  weights {
+    wasm_uint8array = 8.0;
+    pe_uint8array = 10.0;
+  }
 }
-```
 
 ---
 
-## Performance & Sicherheit
-*   **Pcall-Safety:** Alle kritischen Operationen (Base64-Decode, PE-Header-Parsing) sind in `pcall` gekapselt, um Rspamd-Crashes bei korrupten Daten zu verhindern.
-*   **Time Budgeting:** Das Modul misst die CPU-Zeit pro Skript-Block und bricht bei Überschreitung ab, um den Mailfluss nicht zu verzögern.
-*   **Extended Logging:** v3.2 schreibt detaillierte Debug-Zeilen (inkl. `dur_ms`), die genau zeigen, welcher Teil der Deobfuskation zum Treffer geführt hat.
+## Performance & Härtung
+* Deduplizierte Kandidaten: Identische Base64-Blobs werden über verschiedene Blöcke hinweg nur einmal gescannt (Hash-basiert).
+* Privacy-Friendly Logging: Sensible Daten (Message-ID, Subject) werden in den Logs standardmäßig anonymisiert (Redaction).
+* Slow-Log: Protokolliert Skripte, die das Zeitbudget überschreiten, für das Performance-Monitoring.
 
 ---
 
-## Neu in Version 3.2 gegenüber v2.9
-*   [x] **MSIX/APPX Support:** Vollständige Analyse moderner Windows-App-Installer.
-*   [x] **WASM Detection:** Erkennt WebAssembly-Module, die oft für In-Browser-Exploits genutzt werden.
-*   [x] **Smart Text Scan:** Reduziert die Last durch intelligentes Chunking grosser HTML-Dateien.
-*   [x] **Individual Sniffing:** Verhindert Fehlalarme durch zufällig zusammengesetzte Base64-Ketten.
+## Neu in Version 3.3 gegenüber v3.2
+* [x] Entropy Validation: Verhindert das Scannen von Zufalls-Rauschen.
+* [x] Uint8Array Sniffing: Detektion von Malware in JavaScript-Byte-Arrays.
+* [x] Strong Gate Logic: Kontext-Prüfung vor jeder Dekodierung.
+* [x] Trusted Auth Reduction: Volle Integration von SPF/DKIM-Alignment.
+* [x] Privacy Redaction: DSGVO-konforme Protokollierung in den Logs.
 
-**Version:** 3.2 (Februar 2026)  
-**Status:** Stable  
-**Lizenz:** MIT  
+Version: 3.3 (März 2026)
+Status: Enterprise Stable
+Lizenz: MIT
 
-**Dieses Modul verwandelt Rspamd in eine präemptive Abwehrschicht, die Angreifer dort entlarvt, wo sie sich am sichersten fühlen: in der Komplexität von verschleiertem JavaScript.**
+v3.3 ist die ultimative Antwort auf polymorphe HTML-Smuggling-Angriffe und deklassiert herkömmliche Cloud-Filter technologisch.
