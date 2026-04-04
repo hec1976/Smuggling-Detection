@@ -1,5 +1,5 @@
 # create_realistic_test_suite.ps1
-# Erstellt 30 REALISTISCHE HTML-Testdateien fuer HTML Smuggling Detection v4.3.7a
+# Erstellt 30 realistische HTML Testdateien fuer HTML Smuggling Detection v4.3.7a
 # Deckt alle Module ab: JS Smuggling, Obfuscation, WASM, PDF, SVG, Certificates, Images, Attachments
 # Ausgabe: UTF-8 ohne BOM
 
@@ -11,75 +11,141 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 Write-Host "╔══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   REALISTIC HTML Smuggling Test Suite v2.0 - fuer Rspamd v4.3.7a                       ║" -ForegroundColor Cyan
-Write-Host "║   Module: JS Smuggling | Obfuscation | WASM | PDF | SVG | Certificates | Images       ║" -ForegroundColor Cyan
+Write-Host "║   REALISTIC HTML Smuggling Test Suite v2.1 fuer Rspamd v4.3.7a                      ║" -ForegroundColor Cyan
+Write-Host "║   Module: JS Smuggling | Obfuscation | WASM | PDF | SVG | Certificates | Images    ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
-$testFolder = "HTML_Smuggling_TestSuite_v2"
-if (!(Test-Path -LiteralPath $testFolder)) {
-  New-Item -ItemType Directory -Path $testFolder | Out-Null
+$testFolderName = 'HTML_Smuggling_TestSuite_v2'
+$outputRoot = Join-Path -Path (Get-Location).Path -ChildPath $testFolderName
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+if (-not (Test-Path -LiteralPath $outputRoot)) {
+  New-Item -ItemType Directory -Path $outputRoot | Out-Null
 }
 
-Push-Location $testFolder
+function Join-ByteArrays {
+  param(
+    [Parameter(Mandatory)]
+    [byte[][]]$Arrays
+  )
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
+  $ms = New-Object System.IO.MemoryStream
+  try {
+    foreach ($arr in $Arrays) {
+      if ($null -ne $arr -and $arr.Length -gt 0) {
+        $ms.Write($arr, 0, $arr.Length)
+      }
+    }
+    return $ms.ToArray()
+  }
+  finally {
+    $ms.Dispose()
+  }
+}
+
+function Convert-BytesToBase64 {
+  param(
+    [Parameter(Mandatory)]
+    [byte[]]$Bytes
+  )
+  return [Convert]::ToBase64String($Bytes)
+}
+
+function Write-Utf8NoBomFile {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$Content
+  )
+
+  [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
 
 function New-FakePEHeader {
-  # Erstellt einen minimalen aber VALIDEN PE-Header (264 Bytes)
-  $dos = [byte[]](
+  # Minimaler, konsistenter PE Header
+  [byte[]]$dos = @(
     0x4D,0x5A,0x90,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0xFF,0xFF,0x00,0x00,
     0xB8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x00,0x00,0x00
   )
-  
-  $stub = [byte[]](0x0E) * (0x80 - $dos.Length)
-  
-  $pe = [byte[]](
-    0x50,0x45,0x00,0x00,  # PE\0\0
-    0x4C,0x01,            # Machine: 0x014C (i386)
-    0x03,0x00,            # NumberOfSections: 3
-    0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,
-    0xE0,0x00,            # SizeOfOptionalHeader
-    0x02,0x01             # Characteristics
-  )
-  
-  $optional = [byte[]](0x00) * 224
-  $optional[0] = 0x0B  # Magic: PE32
-  $optional[1] = 0x01
-  
-  $full = $dos + $stub + $pe + $optional
-  
-  if ($full.Length -lt 512) {
-    $padding = [byte[]](0x00) * (512 - $full.Length)
-    $full = $full + $padding
+
+  $stubLen = 0x80 - $dos.Length
+  $stub = New-Object byte[] $stubLen
+  for ($i = 0; $i -lt $stub.Length; $i++) {
+    $stub[$i] = 0x0E
   }
-  
-  return [Convert]::ToBase64String($full)
+
+  [byte[]]$pe = @(
+    0x50,0x45,0x00,0x00,
+    0x4C,0x01,
+    0x03,0x00,
+    0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,
+    0xE0,0x00,
+    0x02,0x01
+  )
+
+  $optional = New-Object byte[] 224
+  $optional[0] = 0x0B
+  $optional[1] = 0x01
+
+  [byte[]]$full = Join-ByteArrays -Arrays @($dos, $stub, $pe, $optional)
+
+  if ($full.Length -lt 512) {
+    $padding = New-Object byte[] (512 - $full.Length)
+    [byte[]]$full = Join-ByteArrays -Arrays @($full, $padding)
+  }
+
+  return (Convert-BytesToBase64 -Bytes $full)
 }
 
 function New-FakeWASMModule {
-  $wasm = [byte[]](
-    0x00,0x61,0x73,0x6D,  # \0asm
-    0x01,0x00,0x00,0x00   # Version 1
+  [byte[]]$wasm = Join-ByteArrays -Arrays @(
+    [byte[]](0x00,0x61,0x73,0x6D,0x01,0x00,0x00,0x00),
+    [byte[]](0x01,0x04,0x01,0x60,0x00,0x00),
+    [byte[]](0x03,0x02,0x01,0x00),
+    [byte[]](0x07,0x08,0x01,0x04,0x6D,0x61,0x69,0x6E,0x00,0x00),
+    [byte[]](0x0A,0x04,0x01,0x02,0x00,0x0B)
   )
-  
-  $wasm += [byte[]](0x01,0x04,0x01,0x60,0x00,0x00)
-  $wasm += [byte[]](0x03,0x02,0x01,0x00)
-  $wasm += [byte[]](0x07,0x08,0x01,0x04,0x6D,0x61,0x69,0x6E,0x00,0x00)
-  $wasm += [byte[]](0x0A,0x04,0x01,0x02,0x00,0x0B)
-  
+
   if ($wasm.Length -lt 256) {
-    $padding = [byte[]](0x00) * (256 - $wasm.Length)
-    $wasm = $wasm + $padding
+    $padding = New-Object byte[] (256 - $wasm.Length)
+    [byte[]]$wasm = Join-ByteArrays -Arrays @($wasm, $padding)
   }
-  
-  return [Convert]::ToBase64String($wasm)
+
+  return (Convert-BytesToBase64 -Bytes $wasm)
+}
+
+function New-FakeZipContainer {
+  [byte[]]$zip = @(
+    0x50,0x4B,0x03,0x04,0x14,0x00,0x00,0x00,0x08,0x00,
+    0x00,0x00,0x21,0x00,0x12,0x34,0x56,0x78,0x08,0x00,
+    0x00,0x00,0x08,0x00,0x00,0x00,0x08,0x00,0x00,0x00,
+    0x74,0x65,0x73,0x74,0x2E,0x74,0x78,0x74,0x54,0x45,
+    0x53,0x54,0x44,0x41,0x54,0x41
+  )
+  return (Convert-BytesToBase64 -Bytes $zip)
+}
+
+function New-FakeCHM {
+  [byte[]]$chm = @(
+    0x49,0x54,0x53,0x46,0x03,0x00,0x00,0x00,0x60,0x00,0x00,0x00,
+    0x01,0x00,0x00,0x00,0xAA,0xBB,0xCC,0xDD
+  )
+  return (Convert-BytesToBase64 -Bytes $chm)
+}
+
+function New-FakeLNK {
+  [byte[]]$lnk = @(
+    0x4C,0x00,0x00,0x00,
+    0x01,0x14,0x02,0x00,
+    0x00,0x00,0x00,0x00,
+    0xC0,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x46
+  )
+  return (Convert-BytesToBase64 -Bytes $lnk)
 }
 
 function New-FakePDFWithJavaScript {
@@ -107,17 +173,17 @@ xref
 0 6
 0000000000 65535 f
 0000000009 00000 n
-0000000078 00000 n
-0000000137 00000 n
-0000000206 00000 n
-0000000270 00000 n
+0000000077 00000 n
+0000000136 00000 n
+0000000212 00000 n
+0000000287 00000 n
 trailer
 << /Size 6 /Root 1 0 R >>
 startxref
-337
+354
 %%EOF
 "@
-  return [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pdf))
+  return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($pdf))
 }
 
 function New-FakePDFWithLaunch {
@@ -139,52 +205,58 @@ endobj
 << /Type /Filespec /F (malware.exe) /EF << /F 6 0 R >> /UF (malware.exe) >>
 endobj
 6 0 obj
-<< /Type /EmbeddedFile /Length 100 /Params << /Launch << /Win (malware.exe) >> >> >>
+<< /Type /EmbeddedFile /Length 16 /Params << /Size 16 >> >>
 stream
-MZÿÿ
+MZFAKEPAYLOAD01
 endstream
 endobj
+7 0 obj
+<< /Type /Action /S /Launch /Win << /F (malware.exe) >> >>
+endobj
 xref
-0 7
+0 8
 0000000000 65535 f
 0000000009 00000 n
-0000000078 00000 n
-0000000137 00000 n
-0000000198 00000 n
-0000000248 00000 n
-0000000315 00000 n
+0000000094 00000 n
+0000000153 00000 n
+0000000214 00000 n
+0000000264 00000 n
+0000000355 00000 n
+0000000460 00000 n
 trailer
-<< /Size 7 /Root 1 0 R >>
+<< /Size 8 /Root 1 0 R >>
 startxref
-398
+525
 %%EOF
 "@
-  return [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pdf))
+  return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($pdf))
 }
 
 function New-FakeSVG {
-  $svg = @'
-<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
-  <script type="text/javascript">
-    var payload = "BASE64_PLACEHOLDER";
+  param(
+    [Parameter(Mandatory)][string]$EmbeddedBase64
+  )
+
+  return @"
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" width="100" height="100" onload="console.log('svg-loaded')">
+  <script type="text/javascript"><![CDATA[
+    var payload = "$EmbeddedBase64";
     var decoded = atob(payload);
     var blob = new Blob([decoded], {type: 'application/octet-stream'});
     var url = URL.createObjectURL(blob);
-    window.location = url;
-  </script>
-  <rect x="10" y="10" width="80" height="80" fill="red" onload="alert('XSS')"/>
-  <foreignObject>
-    <html:iframe src="javascript:alert('smuggle')"/>
+    window.__smuggle_url = url;
+  ]]></script>
+  <rect x="10" y="10" width="80" height="80" fill="red"/>
+  <foreignObject x="0" y="0" width="50" height="20">
+    <xhtml:div>svg smuggling</xhtml:div>
   </foreignObject>
-  <use href="data:application/octet-stream;base64,UEsDBBQAAAAIA..." />
+  <image href="data:application/octet-stream;base64,$EmbeddedBase64" width="1" height="1" />
 </svg>
-'@
-  return $svg
+"@
 }
 
 function New-FakeCertificate {
-  # Inline PEM Zertifikat
-  $cert = @"
+  return @"
 -----BEGIN CERTIFICATE-----
 MIIDXTCCAkWgAwIBAgIJAKlQz7jYpU9MMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
 BAYTAkRFMQ8wDQYDVQQIDAZCYXllcm4xDzANBgNVBAcMBk11ZW5jaDERMA8GA1UE
@@ -194,11 +266,10 @@ A1UECgwIVGVzdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMtC
 j3lZxJzLxVvzQtq0Wq7X8j2N5P9MkQoRf2A3B4cD5E6F7G8H9I0J1K2L3M4N5O6P
 -----END CERTIFICATE-----
 "@
-  return $cert
 }
 
 function New-FakePKCS7 {
-  $pkcs = @"
+  return @"
 -----BEGIN PKCS7-----
 MIIB1gYJKoZIhvcNAQcCoIIBxzCCAcMCAQExADALBgkqhkiG9w0BBwGgggGmMIIB
 ojCCAYugAwIBAgIJAJlQz7jYpU9MMA0GCSqGSIb3DQEBCwUAMFExCzAJBgNVBAYT
@@ -206,39 +277,39 @@ AkRFMQ8wDQYDVQQIDAZCYXllcm4xDzANBgNVBAcMBk11ZW5jaDERMA8GA1UECgwI
 VGVzdCBDQTENMAsGA1UEAwwEdGVzdDAeFw0yNDAxMDEwMDAwMDBaFw0yNTAxMDEw
 MDAwMDBaMFExCzAJBgNVBAYTAkRFMQ8wDQYDVQQIDAZCYXllcm4xDzANBgNVBAcM
 Bk11ZW5jaDERMA8GA1UECgwIVGVzdCBDQTENMAsGA1UEAwwEdGVzdDCBnzANBgkq
-hkiG9w0BAQEFAAOBjQAwgYkCgYEAy0KPeVnEnMvFW/NC2rRartfyPY3k/0yRChF/
-YDcHhwPkToXsHwj0jQnUrYszg0nU6P7Q8R9S0T1U2V3W4X5Y6Z7a8b9c0d1e2f3g4h
-5i6j7k8l9m0n1o2p3q4r5s6t7u8v9w0x1y2z3A4B5C6D7E8F9G0H1I2J3K4L5M6N
+hkiG9w0BAQEFAAOBjQAwgYkCgYEAy0KPeVnEnMvFWNC2rRartfyPY3k0yRChFYYDc
+HhwPkToXsHwj0jQnUrYszg0nU6P7Q8R9S0T1U2V3W4X5Y6Z7a8b9c0d1e2f3g4h5i6
+j7k8l9m0n1o2p3q4r5s6t7u8v9w0x1y2z3A4B5C6D7E8F9G0H1I2J3K4L5M6N
 -----END PKCS7-----
 "@
-  return $pkcs
 }
-
-# ============================================================================
-# GENERATE PAYLOADS
-# ============================================================================
 
 Write-Host "Generiere Payloads..." -ForegroundColor Yellow
 $PE_BASE64 = New-FakePEHeader
 $WASM_BASE64 = New-FakeWASMModule
 $PDF_JS_BASE64 = New-FakePDFWithJavaScript
 $PDF_LAUNCH_BASE64 = New-FakePDFWithLaunch
-$SVG_CONTENT = New-FakeSVG -replace "BASE64_PLACEHOLDER", $PE_BASE64
-$SVG_BASE64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($SVG_CONTENT))
+$ZIP_BASE64 = New-FakeZipContainer
+$CHM_BASE64 = New-FakeCHM
+$LNK_BASE64 = New-FakeLNK
 $CERT_PEM = New-FakeCertificate
 $CERT_PKCS7 = New-FakePKCS7
+$SVG_CONTENT = New-FakeSVG -EmbeddedBase64 $PE_BASE64
+$SVG_BASE64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($SVG_CONTENT))
+$HTA_BASE64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('<HTA:APPLICATION><script>alert("xs")</script>'))
+$JS_ATTACHMENT_BASE64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("var payload = 'test'; function run() { return payload; }"))
 
 Write-Host "PE Payload: $($PE_BASE64.Length) Zeichen" -ForegroundColor Gray
 Write-Host "WASM Payload: $($WASM_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "ZIP Payload: $($ZIP_BASE64.Length) Zeichen" -ForegroundColor Gray
 Write-Host ""
 
-# ============================================================================
-# TEST DEFINITIONS - 30 TESTS
-# ============================================================================
+$certPemB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CERT_PEM))
+$certPkcs7B64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CERT_PKCS7))
 
 $testFiles = @()
 
-# ===== KERNEL MODULE TESTS (JS_SMUGGLING, OBFUSCATION, CONTAINER) =====
+# ===== KERNEL MODULE TESTS =====
 
 $testFiles += @{
   Name = "test01_basic_pe_smuggling.html"
@@ -317,7 +388,7 @@ $testFiles += @{
   Name = "test04_obfuscated_pe.html"
   ExpectedScore = "24-30"
   ExpectedDetection = "YES"
-  Description = "Polymorphic Obfuscation + PE (hex var names, array index)"
+  Description = "Polymorphic Obfuscation + PE"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -350,7 +421,7 @@ var decoded = atob(wasmData);
 var blob = new Blob([decoded], {type: 'application/wasm'});
 var url = URL.createObjectURL(blob);
 if (typeof WebAssembly !== 'undefined') {
-  fetch(url).then(r => r.arrayBuffer()).then(bytes => {
+  fetch(url).then(function(r) { return r.arrayBuffer(); }).then(function(bytes) {
     WebAssembly.instantiate(bytes);
   });
 }
@@ -363,7 +434,7 @@ $testFiles += @{
   Name = "test06_uint8array_pe.html"
   ExpectedScore = "20-28"
   ExpectedDetection = "YES"
-  Description = "Uint8Array mit PE Bytes (CRITICAL!)"
+  Description = "Uint8Array mit PE Bytes"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -442,8 +513,8 @@ $testFiles += @{
 <script>
 var payload = "$PE_BASE64";
 fetch('data:application/octet-stream;base64,' + payload)
-  .then(r => r.blob())
-  .then(b => {
+  .then(function(r) { return r.blob(); })
+  .then(function(b) {
     var url = URL.createObjectURL(b);
     var a = document.createElement('a');
     a.href = url;
@@ -459,7 +530,7 @@ $testFiles += @{
   Name = "test10_appinstaller_schema.html"
   ExpectedScore = "8-12"
   ExpectedDetection = "YES"
-  Description = "ms-appinstaller URI Schema (APPINSTALLER)"
+  Description = "ms-appinstaller URI Schema"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -468,18 +539,19 @@ var schema = "ms-appinstaller:?source=https://example.com/malware.appinstaller";
 var xml = '<?xml version="1.0"?><AppInstaller Uri="https://example.com/app.msix" Version="1.0.0.0"><MainPackage Name="App" Publisher="CN=Test" Version="1.0.0.0" Uri="https://example.com/app.msix"/></AppInstaller>';
 var blob = new Blob([xml], {type: 'application/xml'});
 var url = URL.createObjectURL(blob);
+console.log(schema, url);
 </script>
 </body></html>
 "@
 }
 
-# ===== ATTACHMENT VECTORS MODULE TESTS (PDF, SVG, CHM, HTA, Office) =====
+# ===== ATTACHMENT VECTORS =====
 
 $testFiles += @{
   Name = "test11_pdf_javascript_attachment.html"
   ExpectedScore = "6-10"
   ExpectedDetection = "YES"
-  Description = "PDF mit /JavaScript Action (PDF_ACTIVE)"
+  Description = "PDF mit /JavaScript Action"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -502,7 +574,7 @@ $testFiles += @{
   Name = "test12_pdf_launch_attachment.html"
   ExpectedScore = "8-12"
   ExpectedDetection = "YES"
-  Description = "PDF mit /Launch Action (PDF_ACTIVE)"
+  Description = "PDF mit /Launch Action"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -521,7 +593,7 @@ $testFiles += @{
   Name = "test13_svg_active_content.html"
   ExpectedScore = "8-12"
   ExpectedDetection = "YES"
-  Description = "SVG mit script und event handler (SVG_ACTIVE)"
+  Description = "SVG mit script und active content"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -534,13 +606,13 @@ $testFiles += @{
   Name = "test14_chm_attachment.html"
   ExpectedScore = "10-15"
   ExpectedDetection = "YES"
-  Description = "CHM Datei als Attachment (CONTAINER)"
+  Description = "CHM Datei als Attachment"
   Content = @"
 <!DOCTYPE html>
 <html><body>
 <p>Help documentation</p>
 <script>
-var chmData = "SUlURiM=";
+var chmData = "$CHM_BASE64";
 var decoded = atob(chmData);
 var blob = new Blob([decoded], {type: 'application/vnd.ms-htmlhelp'});
 var url = URL.createObjectURL(blob);
@@ -557,12 +629,12 @@ $testFiles += @{
   Name = "test15_hta_attachment.html"
   ExpectedScore = "12-18"
   ExpectedDetection = "YES"
-  Description = "HTA Datei (SCRIPT_HARD)"
+  Description = "HTA Datei"
   Content = @"
 <!DOCTYPE html>
 <html><body>
 <script>
-var htaData = "PEhUQTpBUFBMSUNBVElPTj4KPHNjcmlwdD5hbGVydCgneHMnKTwvc2NyaXB0Pg==";
+var htaData = "$HTA_BASE64";
 var decoded = atob(htaData);
 var blob = new Blob([decoded], {type: 'application/hta'});
 var url = URL.createObjectURL(blob);
@@ -579,12 +651,12 @@ $testFiles += @{
   Name = "test16_onenote_attachment.html"
   ExpectedScore = "10-15"
   ExpectedDetection = "YES"
-  Description = "OneNote Datei (ONENOTE)"
+  Description = "OneNote Datei"
   Content = @"
 <!DOCTYPE html>
 <html><body>
 <script>
-var oneData = "UEsDBBQAAAAIA...";
+var oneData = "$ZIP_BASE64";
 var decoded = atob(oneData);
 var blob = new Blob([decoded], {type: 'application/onenote'});
 var url = URL.createObjectURL(blob);
@@ -606,8 +678,9 @@ $testFiles += @{
 <!DOCTYPE html>
 <html><body>
 <script>
-var docmData = "UEsDBAoAAAAAIA...";
-var blob = new Blob([docmData], {type: 'application/vnd.ms-word.document.macroEnabled.12'});
+var docmData = "$ZIP_BASE64";
+var decoded = atob(docmData);
+var blob = new Blob([decoded], {type: 'application/vnd.ms-word.document.macroEnabled.12'});
 var url = URL.createObjectURL(blob);
 var a = document.createElement('a');
 a.href = url;
@@ -622,13 +695,14 @@ $testFiles += @{
   Name = "test18_lnk_attachment.html"
   ExpectedScore = "8-12"
   ExpectedDetection = "YES"
-  Description = "LNK Shortcut Datei (LNK)"
+  Description = "LNK Shortcut Datei"
   Content = @"
 <!DOCTYPE html>
 <html><body>
 <script>
-var lnkData = "TAAAAAA...";
-var blob = new Blob([lnkData], {type: 'application/x-ms-shortcut'});
+var lnkData = "$LNK_BASE64";
+var decoded = atob(lnkData);
+var blob = new Blob([decoded], {type: 'application/x-ms-shortcut'});
 var url = URL.createObjectURL(blob);
 var a = document.createElement('a');
 a.href = url;
@@ -643,12 +717,12 @@ $testFiles += @{
   Name = "test19_script_attachment_js.html"
   ExpectedScore = "10-15"
   ExpectedDetection = "YES"
-  Description = "JavaScript Datei als Attachment (SCRIPT_HARD)"
+  Description = "JavaScript Datei als Attachment"
   Content = @"
 <!DOCTYPE html>
 <html><body>
 <script>
-var jsData = "dmFyIHBheWxvYWQgPSAndGVzdCc7CmZ1bmN0aW9uIHJ1bigpIHt9";
+var jsData = "$JS_ATTACHMENT_BASE64";
 var decoded = atob(jsData);
 var blob = new Blob([decoded], {type: 'text/javascript'});
 var url = URL.createObjectURL(blob);
@@ -661,13 +735,13 @@ a.click();
 "@
 }
 
-# ===== CERTIFICATE SMUGGLING MODULE TESTS =====
+# ===== CERTIFICATE SMUGGLING =====
 
 $testFiles += @{
   Name = "test20_certificate_inline_pem.html"
   ExpectedScore = "2-5"
   ExpectedDetection = "YES"
-  Description = "Inline PEM Zertifikat (CERT_SMUGGLING)"
+  Description = "Inline PEM Zertifikat"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -675,9 +749,9 @@ $testFiles += @{
 $CERT_PEM
 </pre>
 <script>
-// Hidden certificate smuggling context
-var certData = "$([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CERT_PEM)))";
+var certData = "$certPemB64";
 var decoded = atob(certData);
+console.log(decoded.length);
 </script>
 </body></html>
 "@
@@ -687,7 +761,7 @@ $testFiles += @{
   Name = "test21_certificate_pkcs7_inline.html"
   ExpectedScore = "2-5"
   ExpectedDetection = "YES"
-  Description = "Inline PKCS7 Container (CERT_SMUGGLING)"
+  Description = "Inline PKCS7 Container"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -695,7 +769,8 @@ $testFiles += @{
 $CERT_PKCS7
 </pre>
 <script>
-var pkcsData = "$([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CERT_PKCS7)))";
+var pkcsData = "$certPkcs7B64";
+console.log(pkcsData.length);
 </script>
 </body></html>
 "@
@@ -705,7 +780,7 @@ $testFiles += @{
   Name = "test22_certificate_smuggling_context.html"
   ExpectedScore = "6-10"
   ExpectedDetection = "YES"
-  Description = "Zertifikat + Smuggling Context (CERT_SMUGGLING + JS_SMUGGLING)"
+  Description = "Zertifikat + Smuggling Context"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -715,18 +790,19 @@ var payload = "$PE_BASE64";
 var decoded = atob(payload);
 var blob = new Blob([decoded], {type: 'application/octet-stream'});
 var url = URL.createObjectURL(blob);
+console.log(cert.length, url);
 </script>
 </body></html>
 "@
 }
 
-# ===== IMAGE SMUGGLING INFO MODULE TESTS =====
+# ===== IMAGE SMUGGLING INFO =====
 
 $testFiles += @{
   Name = "test23_image_double_ext.html"
   ExpectedScore = "0-2"
   ExpectedDetection = "INFO_ONLY"
-  Description = "Image mit doppelter Extension (image_double_ext)"
+  Description = "Image mit doppelter Extension"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -740,7 +816,7 @@ $testFiles += @{
   Name = "test24_image_polyglot_hint.html"
   ExpectedScore = "0-2"
   ExpectedDetection = "INFO_ONLY"
-  Description = "Image mit verdächtigem Namen (image_polyglot_name)"
+  Description = "Image mit verdaechtigem Namen"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -750,21 +826,21 @@ $testFiles += @{
 "@
 }
 
-# ===== CSS CODE EXECUTION MODULE TESTS =====
+# ===== CSS CODE EXECUTION =====
 
 $testFiles += @{
   Name = "test25_css_code_execution.html"
   ExpectedScore = "6-10"
   ExpectedDetection = "YES"
-  Description = "CSS Code Execution (CSS_CODE_EXEC)"
+  Description = "CSS Code Execution"
   Content = @"
 <!DOCTYPE html>
 <html><head>
 <style>
-::before {
+body::before {
   content: "atob('cGF5bG9hZA==')";
 }
-::after {
+body::after {
   content: "eval(atob('dGVzdA=='))";
 }
 </style>
@@ -785,7 +861,7 @@ $testFiles += @{
   Name = "test26_css_computedstyle_exec.html"
   ExpectedScore = "4-8"
   ExpectedDetection = "YES"
-  Description = "CSS getComputedStyle Execution (CSS_CODE_EXEC)"
+  Description = "CSS getComputedStyle Execution"
   Content = @"
 <!DOCTYPE html>
 <html><head>
@@ -797,20 +873,20 @@ $testFiles += @{
 <div id="test"></div>
 <script>
 var before = getComputedStyle(document.getElementById('test'), '::before').content;
-var decoded = atob(before.replace(/['\"]/g, ''));
+var decoded = atob(before.replace(/['"]/g, ''));
 eval(decoded);
 </script>
 </body></html>
 "@
 }
 
-# ===== NEGATIVE TESTS (Should NOT trigger) =====
+# ===== NEGATIVE TESTS =====
 
 $testFiles += @{
   Name = "test27_NEGATIVE_legitimate.html"
   ExpectedScore = "0-2"
   ExpectedDetection = "NO"
-  Description = "Legitime Website (sollte nicht triggern)"
+  Description = "Legitime Website"
   Content = @"
 <!DOCTYPE html>
 <html>
@@ -834,7 +910,7 @@ $testFiles += @{
   Name = "test28_NEGATIVE_newsletter.html"
   ExpectedScore = "0-1"
   ExpectedDetection = "NO"
-  Description = "Newsletter mit Tracking (heur_mul reduziert)"
+  Description = "Newsletter mit Tracking"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -852,7 +928,7 @@ $testFiles += @{
   Name = "test29_NEGATIVE_safe_domain.html"
   ExpectedScore = "0-2"
   ExpectedDetection = "NO"
-  Description = "External Script von sicherer Domain (safe_script_domains)"
+  Description = "External Script von sicherer Domain"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -866,18 +942,18 @@ console.log(data);
 "@
 }
 
-# ===== ALL-IN-ONE MAXIMUM TEST =====
+# ===== ALL IN ONE =====
 
 $testFiles += @{
   Name = "test30_ALL_IN_ONE_MAXIMUM.html"
   ExpectedScore = "40-55"
   ExpectedDetection = "YES"
-  Description = "Alle Techniken kombiniert (MAXIMUM SCORE)"
+  Description = "Alle Techniken kombiniert"
   Content = @"
 <!DOCTYPE html>
 <html><head>
 <style>
-::before { content: "atob('$($PE_BASE64.Substring(0,100))')"; }
+body::before { content: "atob('$($PE_BASE64.Substring(0,100))')"; }
 </style>
 </head>
 <body>
@@ -898,36 +974,36 @@ setTimeout(function() {
   var canvas = document.getElementById('qr');
   var ctx = canvas.getContext('2d');
   ctx.fillRect(0, 0, 100, 100);
-  
+
   var decode = window[_0x1a2b[0]];
   var decoded = decode(payload);
   var blob = new window[_0x1a2b[1]]([decoded], {type: 'application/octet-stream'});
   var url = URL[_0x1a2b[2]](blob);
-  
+
   var workerCode = 'self.postMessage("ready")';
   var workerBlob = new Blob([workerCode], {type: 'application/javascript'});
   var workerUrl = URL.createObjectURL(workerBlob);
   var worker = new Worker(workerUrl);
-  
-  fetch(url).then(r => r.blob()).then(b => {
+
+  fetch(url).then(function(r) { return r.blob(); }).then(function(b) {
     var finalUrl = URL.createObjectURL(b);
     var a = document.createElement('a');
     a.href = finalUrl;
     a.download = 'all_in_one.exe';
     a.click();
   });
-  
+
   document.getElementById('hidden').src = 'data:text/html;base64,' + payload.substring(0, 100);
 }, 100);
 
 if ('serviceWorker' in navigator) {
-  var swCode = 'self.addEventListener("install", e => e.waitUntil(self.skipWaiting()))';
+  var swCode = 'self.addEventListener("install", function(e) { e.waitUntil(self.skipWaiting()); })';
   var swBlob = new Blob([swCode], {type: 'application/javascript'});
   var swUrl = URL.createObjectURL(swBlob);
   navigator.serviceWorker.register(swUrl);
 }
 
-if (crypto && crypto.subtle) {
+if (window.crypto && crypto.subtle) {
   crypto.subtle.generateKey({name: 'AES-CBC', length: 256}, true, ['encrypt']);
 }
 
@@ -936,7 +1012,7 @@ var wasmDecoded = atob(wasmData);
 var wasmBlob = new Blob([wasmDecoded], {type: 'application/wasm'});
 var wasmUrl = URL.createObjectURL(wasmBlob);
 if (typeof WebAssembly !== 'undefined') {
-  fetch(wasmUrl).then(r => r.arrayBuffer()).then(bytes => {
+  fetch(wasmUrl).then(function(r) { return r.arrayBuffer(); }).then(function(bytes) {
     WebAssembly.instantiate(bytes);
   });
 }
@@ -944,10 +1020,6 @@ if (typeof WebAssembly !== 'undefined') {
 </body></html>
 "@
 }
-
-# ============================================================================
-# CREATE FILES
-# ============================================================================
 
 $successCount = 0
 $errorCount = 0
@@ -957,68 +1029,71 @@ Write-Host ""
 Write-Host "Generiere Testdateien..." -ForegroundColor Yellow
 Write-Host ""
 
-foreach ($file in $testFiles) {
-  try {
-    $path = Join-Path (Get-Location) $file.Name
+Push-Location -LiteralPath $outputRoot
+try {
+  foreach ($file in $testFiles) {
+    try {
+      $path = Join-Path -Path (Get-Location).Path -ChildPath $file.Name
 
-    if (Test-Path -LiteralPath $path -and -not $Force) {
-      Write-Host "⏭  Überspringe existierende Datei: $($file.Name) (nutze -Force)" -ForegroundColor Yellow
-      continue
+      if ((Test-Path -LiteralPath $path) -and (-not $Force)) {
+        Write-Host "⏭  Ueberspringe existierende Datei: $($file.Name) (nutze -Force)" -ForegroundColor Yellow
+        continue
+      }
+
+      Write-Utf8NoBomFile -Path $path -Content $file.Content
+
+      Write-Host "✅ $($file.Name)" -ForegroundColor Green
+      Write-Host "   Score: $($file.ExpectedScore) | Detection: $($file.ExpectedDetection)" -ForegroundColor Gray
+      Write-Host "   $($file.Description)" -ForegroundColor DarkGray
+      Write-Host ""
+
+      $summary += [PSCustomObject]@{
+        File = $file.Name
+        ExpectedScore = $file.ExpectedScore
+        Detection = $file.ExpectedDetection
+        Description = $file.Description
+      }
+
+      $successCount++
     }
-
-    [System.IO.File]::WriteAllText(
-      $path,
-      $file.Content,
-      [System.Text.UTF8Encoding]::new($false)
-    )
-
-    Write-Host "✅ $($file.Name)" -ForegroundColor Green
-    Write-Host "   Score: $($file.ExpectedScore) | Detection: $($file.ExpectedDetection)" -ForegroundColor Gray
-    Write-Host "   $($file.Description)" -ForegroundColor DarkGray
-    Write-Host ""
-    
-    $summary += [PSCustomObject]@{
-      File = $file.Name
-      ExpectedScore = $file.ExpectedScore
-      Detection = $file.ExpectedDetection
-      Description = $file.Description
+    catch {
+      Write-Host "❌ Fehler bei $($file.Name): $($_.Exception.Message)" -ForegroundColor Red
+      $errorCount++
     }
-    
-    $successCount++
   }
-  catch {
-    Write-Host "❌ Fehler bei $($file.Name): $($_.Exception.Message)" -ForegroundColor Red
-    $errorCount++
+
+  $csvPath = Join-Path -Path (Get-Location).Path -ChildPath 'test_manifest.csv'
+  $jsonPath = Join-Path -Path (Get-Location).Path -ChildPath 'test_manifest.json'
+
+  $summary | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+  ($summary | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+
+  Write-Host ""
+  Write-Host "╔══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+  Write-Host "║                         TEST SUITE ABGESCHLOSSEN                                    ║" -ForegroundColor Cyan
+  Write-Host "╠══════════════════════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+  Write-Host "║  Ordner: $outputRoot" -ForegroundColor White
+  Write-Host "║  Erfolgreich: $successCount von $($testFiles.Count)" -ForegroundColor Green
+  if ($errorCount -gt 0) {
+    Write-Host "║  Fehler: $errorCount" -ForegroundColor Red
   }
+  Write-Host "║" -ForegroundColor Cyan
+  Write-Host "║  ERWARTETE DETECTION RATE: 90% (27/30 Tests)" -ForegroundColor Yellow
+  Write-Host "║" -ForegroundColor Cyan
+  Write-Host "║  MODULE TEST COVERAGE:" -ForegroundColor Magenta
+  Write-Host "║    ✅ JS_SMUGGLING       | Tests 01-10" -ForegroundColor Gray
+  Write-Host "║    ✅ ATTACHMENT_VECTORS | Tests 11-19" -ForegroundColor Gray
+  Write-Host "║    ✅ CERT_SMUGGLING     | Tests 20-22" -ForegroundColor Gray
+  Write-Host "║    ✅ IMAGE_SMUGGLING    | Tests 23-24" -ForegroundColor Gray
+  Write-Host "║    ✅ CSS_CODE_EXEC      | Tests 25-26" -ForegroundColor Gray
+  Write-Host "║    ✅ NEGATIVE TESTS     | Tests 27-29" -ForegroundColor Gray
+  Write-Host "║    ✅ ALL IN ONE         | Test 30" -ForegroundColor Gray
+  Write-Host "║" -ForegroundColor Cyan
+  Write-Host "║  CSV Manifest:  $csvPath" -ForegroundColor Gray
+  Write-Host "║  JSON Manifest: $jsonPath" -ForegroundColor Gray
+  Write-Host "╚══════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+  Write-Host ""
 }
-
-# ============================================================================
-# SUMMARY
-# ============================================================================
-
-Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║                         TEST SUITE ABGESCHLOSSEN                                      ║" -ForegroundColor Cyan
-Write-Host "╠══════════════════════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
-Write-Host "║  Ordner: $testFolder" -ForegroundColor White
-Write-Host "║  Erfolgreich: $successCount von $($testFiles.Count)" -ForegroundColor Green
-if ($errorCount -gt 0) {
-  Write-Host "║  Fehler: $errorCount" -ForegroundColor Red
+finally {
+  Pop-Location
 }
-Write-Host "║" -ForegroundColor Cyan
-Write-Host "║  ERWARTETE DETECTION-RATE: 90% (27/30 Tests)" -ForegroundColor Yellow
-Write-Host "║" -ForegroundColor Cyan
-Write-Host "║  MODULE TEST COVERAGE:" -ForegroundColor Magenta
-Write-Host "║    ✅ JS_SMUGGLING       - Tests 01-10" -ForegroundColor Gray
-Write-Host "║    ✅ ATTACHMENT_VECTORS - Tests 11-19 (PDF, SVG, CHM, HTA, Office)" -ForegroundColor Gray
-Write-Host "║    ✅ CERT_SMUGGLING     - Tests 20-22 (PEM, PKCS7)" -ForegroundColor Gray
-Write-Host "║    ✅ IMAGE_SMUGGLING    - Tests 23-24 (Info Only)" -ForegroundColor Gray
-Write-Host "║    ✅ CSS_CODE_EXEC      - Tests 25-26" -ForegroundColor Gray
-Write-Host "║    ✅ NEGATIVE TESTS     - Tests 27-29 (sollten nicht triggern)" -ForegroundColor Gray
-Write-Host "║    ✅ ALL-IN-ONE         - Test 30 (Maximum Score)" -ForegroundColor Gray
-Write-Host "║" -ForegroundColor Cyan
-Write-Host "║  Pfad: $((Get-Location).Path)\$testFolder" -ForegroundColor Gray
-Write-Host "╚══════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
-
-Pop-Location
