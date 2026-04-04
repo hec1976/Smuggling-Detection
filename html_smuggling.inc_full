@@ -1,0 +1,454 @@
+# /etc/rspamd/conf.d/html_smuggling.inc
+# Vollständige Konfiguration für HTML Smuggling Detection v4.3.7
+# Alle Werte entsprechen den Defaults aus dem Lua-Skript
+
+html_smuggling {
+    # ========================================
+    # BASIS-KONFIGURATION
+    # ========================================
+    enabled = true;
+    debug = false;
+    test_mode = false;
+    
+    # ========================================
+    # SCORING LIMITS
+    # ========================================
+    min_score = 0.0;
+    max_final_score = 15.0;
+    soft_only_score_cap = 4.5;
+    critical_boost = 0.0;
+    log_score_threshold = 5.0;
+    log_simple_line = false;
+    score_debug = false;
+    
+    # ========================================
+    # NEWSLETTER & HEURISTIKEN
+    # ========================================
+    deep_scan_newsletter_header = true;
+    heur_mul_default = 1.0;
+    heur_mul_newsletter_header = 0.3;
+    heur_mul_newsletter_heuristic = 0.4;
+    heur_mul_trusted_newsletter = 0.1;
+    
+    # ========================================
+    # EXTERNE MAPS (Dateipfade)
+    # ========================================
+    trusted_newsletter_domains_map = nil;           # z.B. "/etc/rspamd/trusted_nl.map"
+    safe_script_domains_map = nil;                 # z.B. "/etc/rspamd/safe_script.map"
+    unsafe_script_domains_map = nil;               # z.B. "/etc/rspamd/unsafe_script.map"
+    
+    # ========================================
+    # LOGGING & DEBUG
+    # ========================================
+    redact_log_fields = true;
+    force_extended_log = false;
+    force_extended_log_min_score = 5.0;
+    slow_log_ms = 150.0;
+    enable_phase_debug = false;
+    log_config_validation = false;
+    
+    # ========================================
+    # SICHERHEITSOPTIONEN
+    # ========================================
+    require_script_context_for_external = false;
+    require_strong_gate_for_decode = false;
+    hard_fail_on_bad_config = false;
+    safe_task_access = true;
+    safe_part_access = true;
+    strict_weight_validation = false;
+    
+    # ========================================
+    # EXPORT LIMITS
+    # ========================================
+    max_external_reported = 3;
+    
+    # ========================================
+    # SCAN LIMITS
+    # ========================================
+    limits = {
+        scan = {
+            max_bytes = 200 * 1024;               # 200KB
+            smart_chunk = 50 * 1024;              # 50KB
+            long_html_b64_threshold = 1200;
+            max_attachment_text = 300 * 1024;     # 300KB
+        };
+        b64 = {
+            min_len = 200;
+            max_candidates = 6;
+            max_scan_bytes = 500 * 1024;          # 500KB
+            min_decode_total = 1500;
+            big_threshold = 5000;
+            huge_threshold = 20000;
+            join_max_parts = 5;
+            join_max_len = 180000;
+        };
+        decode = {
+            max_bytes = 160 * 1024;               # 160KB
+            joined_len_mul = 2;
+        };
+        script = {
+            max_check = 3;
+            max_external = 5;
+            max_vars = 20;
+            smart_chunk = 20000;
+            max_script_len = 80000;
+            max_total_script_scan = 120000;
+            max_script_time_ms = 80.0;
+            deobfus_timeout_ms = 50.0;
+            split_payload_min_vars = 6;
+        };
+        obfus = {
+            min_frag_len = 4;
+            virtual_trigger_len = 120;
+            virtual_max_payloads = 3;
+            resolve_passes = 8;
+            max_uint8array_bytes = 2048;
+            max_entropy_check_bytes = 4096;
+            css_max_style_size = 10000;
+            max_delayed_exec_context = 500;
+        };
+    };
+    
+    # ========================================
+    # SCHWELLWERTE
+    # ========================================
+    thresholds = {
+        entropy_high = 4.5;
+        entropy_very_high = 5.0;
+        hex_var_low = 2;
+        hex_var_high = 5;
+        array_storage_low = 1;
+        array_storage_high = 3;
+        uint8array_large_min = 1024;
+        deobfus_reduce_len_1 = 20000;
+        deobfus_reduce_len_2 = 40000;
+        b64_extract_loop_budget_ms = 25.0;
+        script_min_len = 20;
+        normalized_script_min_len = 40;
+        delayed_exec_context = 500;
+    };
+    
+    # ========================================
+    # GEWICHTE (SCORING)
+    # ========================================
+    weights = {
+        JS_SMUGGLING       = 1.2;
+        OBFUSCATION        = 2.5;
+        SUSPICIOUS_API     = 0.8;
+        EVASION_LOGIC      = 1.5;
+        CONTAINER          = 6.0;
+        SCRIPT_HARD        = 7.0;
+        CRITICAL           = 12.0;
+        COMBO_JS_OBFUS     = 1.5;
+        COMBO_HARD_OBFUS   = 2.0;
+        COMBO_JS_API       = 0.8;
+        COMBO_JS_EVASION   = 0.7;
+        EXTERNAL_SCRIPT    = 1.0;
+        CSS_EXFIL          = 2.0;
+        GEO_TARGETING      = 0.8;
+        ROTATION_BONUS     = 1.0;
+        CLICKFIX_LURE      = 1.2;
+        WASM_STAGING       = 1.4;
+        BLOCKCHAIN_STAGING = 1.2;
+        CSS_CODE_EXEC      = 1.5;
+        ATTACHMENT_VECTOR  = 1.4;
+        CERT_SMUGGLING     = 1.1;
+        IMAGE_SMUGGLING    = 0.7;
+    };
+    
+    # ========================================
+    # MODULE KONTROLLE
+    # ========================================
+    modules = {
+        appinstaller = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        js_smuggling = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        obfuscation = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        decoded_payload = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        uint8array = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        external_scripts = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        css_exfil = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        geo_targeting = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        evasion = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        persistence = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        domain_rotation = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        clickfix = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        wasm_staging = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        blockchain_staging = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        css_code_execution = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        attachment_vectors = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        certificate_smuggling = {
+            enabled = true;
+            info_only = false;
+            weight_override = nil;
+        };
+        image_smuggling_info = {
+            enabled = false;      # Standard: aus
+            info_only = true;
+            weight_override = nil;
+        };
+        push_abuse = {
+            enabled = true;
+            info_only = true;
+            weight_override = nil;
+        };
+        link_analysis = {
+            enabled = false;
+            info_only = true;
+            weight_override = nil;
+        };
+        wasm_binary_analysis = {
+            enabled = false;
+            info_only = false;
+            weight_override = nil;
+        };
+        rc4_detection = {
+            enabled = false;
+            info_only = false;
+            weight_override = nil;
+        };
+    };
+    
+    # ========================================
+    # REASON POLICY (KLASSEN-ZUORDNUNG)
+    # ========================================
+    reason_policy = {
+        # CRITICAL Klasse
+        dec_pe               = { class = "CRITICAL" };
+        dec_wasm             = { class = "CRITICAL" };
+        dec_msix             = { class = "CRITICAL" };
+        dec_appx             = { class = "CRITICAL" };
+        dec_xml_appinstaller = { class = "CRITICAL" };
+        ms_appinstaller_uri  = { class = "CRITICAL" };
+        pe_uint8array        = { class = "CRITICAL" };
+        wasm_uint8array      = { class = "CRITICAL" };
+        
+        # CONTAINER Klasse
+        att_chm_attachment   = { class = "CONTAINER" };
+        att_onenote_attachment = { class = "CONTAINER" };
+        att_lnk_attachment   = { class = "CONTAINER" };
+        att_office_macro_container = { class = "CONTAINER" };
+        dec_zip              = { class = "CONTAINER" };
+        dec_iso              = { class = "CONTAINER" };
+        dec_lnk              = { class = "CONTAINER" };
+        dec_rar              = { class = "CONTAINER" };
+        dec_7zip             = { class = "CONTAINER" };
+        dec_cab              = { class = "CONTAINER" };
+        dec_vhdx             = { class = "CONTAINER" };
+        dec_ole              = { class = "CONTAINER" };
+        zip_uint8array       = { class = "CONTAINER" };
+        
+        # SCRIPT_HARD Klasse
+        dec_script           = { class = "SCRIPT_HARD" };
+        att_hta_attachment   = { class = "SCRIPT_HARD" };
+        att_script_attachment = { class = "SCRIPT_HARD" };
+        
+        # OBFUSCATION Klasse
+        obfus_api               = { class = "OBFUSCATION" };
+        atob_obfuscated         = { class = "OBFUSCATION" };
+        hex_array               = { class = "OBFUSCATION" };
+        array_join_concat       = { class = "OBFUSCATION" };
+        bracket_atob            = { class = "OBFUSCATION" };
+        fromcharcode_api        = { class = "OBFUSCATION" };
+        fromcharcode_heavy      = { class = "OBFUSCATION" };
+        function_constructor    = { class = "OBFUSCATION" };
+        eval_call               = { class = "OBFUSCATION" };
+        polymorphic_obfuscation = { class = "OBFUSCATION" };
+        hex_var_names           = { class = "OBFUSCATION" };
+        hex_vars                = { class = "OBFUSCATION" };
+        very_high_entropy       = { class = "OBFUSCATION" };
+        high_entropy            = { class = "OBFUSCATION" };
+        array_string_storage    = { class = "OBFUSCATION" };
+        array_storage           = { class = "OBFUSCATION" };
+        func_obfuscation        = { class = "OBFUSCATION" };
+        wasm_eval_bridge        = { class = "OBFUSCATION" };
+        blockchain_eval_bridge  = { class = "OBFUSCATION" };
+        css_code_execution      = { class = "OBFUSCATION" };
+        css_computedstyle_exec  = { class = "OBFUSCATION" };
+        css_hidden_code_string  = { class = "OBFUSCATION" };
+        css_function_bridge     = { class = "OBFUSCATION" };
+        rc4_ksa_pattern         = { class = "OBFUSCATION" };
+        rc4_prga_pattern        = { class = "OBFUSCATION" };
+        rc4_xor_loop            = { class = "OBFUSCATION" };
+        rc4_decrypt_call        = { class = "OBFUSCATION" };
+        rc4_key_material        = { class = "OBFUSCATION" };
+        
+        # SUSPICIOUS_API Klasse
+        webcrypto_api              = { class = "SUSPICIOUS_API" };
+        serviceworker_api          = { class = "SUSPICIOUS_API" };
+        webworker                  = { class = "SUSPICIOUS_API" };
+        webassembly                = { class = "SUSPICIOUS_API" };
+        qr_canvas_api              = { class = "SUSPICIOUS_API" };
+        geo_targeting_api          = { class = "SUSPICIOUS_API" };
+        geo_location_api           = { class = "SUSPICIOUS_API" };
+        localstorage_persistence   = { class = "SUSPICIOUS_API" };
+        sessionstorage_persistence = { class = "SUSPICIOUS_API" };
+        wasm_staged_payload        = { class = "SUSPICIOUS_API" };
+        wasm_fetch_stage           = { class = "SUSPICIOUS_API" };
+        wasm_inline_stage          = { class = "SUSPICIOUS_API" };
+        wasm_worker_stage          = { class = "SUSPICIOUS_API" };
+        blockchain_staged_payload  = { class = "SUSPICIOUS_API" };
+        web3_api_usage             = { class = "SUSPICIOUS_API" };
+        ethers_contract_payload    = { class = "SUSPICIOUS_API" };
+        web3_eth_call              = { class = "SUSPICIOUS_API" };
+        att_pdf_javascript         = { class = "SUSPICIOUS_API" };
+        att_pdf_openaction         = { class = "SUSPICIOUS_API" };
+        att_pdf_launch             = { class = "SUSPICIOUS_API" };
+        att_pdf_embeddedfile       = { class = "SUSPICIOUS_API" };
+        att_pdf_richmedia          = { class = "SUSPICIOUS_API" };
+        att_svg_script             = { class = "SUSPICIOUS_API" };
+        att_svg_event_handler      = { class = "SUSPICIOUS_API" };
+        att_svg_foreignobject      = { class = "SUSPICIOUS_API" };
+        att_svg_xlink_href         = { class = "SUSPICIOUS_API" };
+        att_svg_data_uri           = { class = "SUSPICIOUS_API" };
+        
+        # EVASION Klasse
+        antisandbox_webdriver      = { class = "EVASION" };
+        hardware_check_evasion     = { class = "EVASION" };
+        human_interaction_required = { class = "BONUS_SOFT"; bonus_module = "evasion" };
+        
+        # JS_SMUGGLING Klasse
+        atob                    = { class = "JS_SMUGGLING" };
+        blob                    = { class = "JS_SMUGGLING" };
+        createObjectURL         = { class = "JS_SMUGGLING" };
+        fetch                   = { class = "JS_SMUGGLING" };
+        filereader              = { class = "JS_SMUGGLING" };
+        uint8array              = { class = "JS_SMUGGLING" };
+        uint8array_payload      = { class = "JS_SMUGGLING" };
+        large_uint8array        = { class = "JS_SMUGGLING" };
+        pdf_uint8array          = { class = "JS_SMUGGLING" };
+        split_payload           = { class = "JS_SMUGGLING" };
+        delayed_execution       = { class = "JS_SMUGGLING" };
+        timeout_b64_smuggling   = { class = "JS_SMUGGLING" };
+        timeout_b64_decode      = { class = "JS_SMUGGLING" };
+        timeout_b64             = { class = "JS_SMUGGLING" };
+        dom_clobbering          = { class = "JS_SMUGGLING" };
+        data_uri                = { class = "JS_SMUGGLING" };
+        iframe_src              = { class = "JS_SMUGGLING" };
+        b64_long_html           = { class = "JS_SMUGGLING" };
+        b64_total_len_big       = { class = "JS_SMUGGLING" };
+        b64_total_len_huge      = { class = "JS_SMUGGLING" };
+        b64_joined_parts        = { class = "JS_SMUGGLING" };
+        virtual_b64_candidates  = { class = "JS_SMUGGLING" };
+        array_index_atob        = { class = "JS_SMUGGLING" };
+        array_index_blob        = { class = "JS_SMUGGLING" };
+        array_index_fetch       = { class = "JS_SMUGGLING" };
+        settimeout_call         = { class = "JS_SMUGGLING" };
+        setinterval_call        = { class = "JS_SMUGGLING" };
+        event_handler_api       = { class = "JS_SMUGGLING" };
+        appinstaller_file       = { class = "JS_SMUGGLING" };
+        ms_appinstaller_word    = { class = "JS_SMUGGLING" };
+        dec_js                  = { class = "JS_SMUGGLING" };
+        dec_html                = { class = "JS_SMUGGLING" };
+        dec_pdf                 = { class = "JS_SMUGGLING" };
+        dec_xml                 = { class = "JS_SMUGGLING" };
+        dec_bin                 = { class = "JS_SMUGGLING" };
+        computed_redirect       = { class = "JS_SMUGGLING" };
+        att_html_attachment     = { class = "JS_SMUGGLING" };
+        att_svg_smuggling_context = { class = "JS_SMUGGLING" };
+        
+        # BONUS_SOFT Klasse
+        timezone_targeting      = { class = "BONUS_SOFT"; bonus_module = "geo_targeting" };
+        domain_rotation         = { class = "BONUS_SOFT"; bonus_module = "domain_rotation" };
+        external_scripts        = { class = "BONUS_SOFT"; bonus_module = "external_scripts" };
+        css_exfiltration        = { class = "BONUS_SOFT"; bonus_module = "css_exfil" };
+        clickfix_lure           = { class = "BONUS_SOFT"; bonus_module = "clickfix" };
+        fake_captcha_lure       = { class = "BONUS_SOFT"; bonus_module = "clickfix" };
+        clipboard_exec_lure     = { class = "BONUS_SOFT"; bonus_module = "clickfix" };
+        run_dialog_lure         = { class = "BONUS_SOFT"; bonus_module = "clickfix" };
+        powershell_lure         = { class = "BONUS_SOFT"; bonus_module = "clickfix" };
+        wasm_suspicious_exports = { class = "BONUS_SOFT"; bonus_module = "wasm_staging" };
+        blockchain_remote_stage = { class = "BONUS_SOFT"; bonus_module = "blockchain_staging" };
+        css_before_after_content = { class = "BONUS_SOFT"; bonus_module = "css_code_execution" };
+        cert_inline_pem         = { class = "BONUS_SOFT"; bonus_module = "certificate_smuggling" };
+        cert_inline_pkcs        = { class = "BONUS_SOFT"; bonus_module = "certificate_smuggling" };
+        cert_data_uri           = { class = "BONUS_SOFT"; bonus_module = "certificate_smuggling" };
+        cert_base64_block       = { class = "BONUS_SOFT"; bonus_module = "certificate_smuggling" };
+        
+        # BONUS_INFO Klasse
+        css_import_external      = { class = "BONUS_INFO" };
+        css_attr_exfil           = { class = "BONUS_INFO" };
+        css_large_b64            = { class = "BONUS_INFO" };
+        push_notification_flow   = { class = "BONUS_INFO" };
+        push_permission_request  = { class = "BONUS_INFO" };
+        push_serviceworker_combo = { class = "BONUS_INFO" };
+        cert_attachment_file     = { class = "BONUS_INFO" };
+        image_polyglot_name      = { class = "BONUS_INFO" };
+        image_embedded_payload_hint = { class = "BONUS_INFO" };
+        image_double_ext         = { class = "BONUS_INFO" };
+        
+        # INFO Klasse
+        script_time_budget            = { class = "INFO" };
+        script_total_budget           = { class = "INFO" };
+        deobfus_timeout               = { class = "INFO" };
+        decode_gate_not_strong_enough = { class = "INFO" };
+        soft_only_cap                 = { class = "INFO" };
+        max_final_score               = { class = "INFO" };
+        min_score                     = { class = "INFO" };
+        critical_boost                = { class = "INFO" };
+        single_sniff_pe               = { class = "INFO" };
+    };
+}
