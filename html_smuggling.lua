@@ -1,5 +1,5 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.3.7
+-- HTML Smuggling Detection v4.3.7a
 --
 -- Erweiterungen gegenueber v4.3.6d:
 --   15. attachment_vectors Modul fuer Non HTML und Attachment Vektoren
@@ -10,6 +10,12 @@
 --   20. SVG Active Content Erkennung fuer <script>, onload, foreignObject, xlink:href, data URIs
 --   21. Zertifikats Container und Inline PEM Erkennung mit FP armer Kontextlogik
 --
+-- Fixes gegenueber v4.3.7:
+--   22. soft_only_cap wird korrekt aus CFG.soft_only_cap gelesen
+--   23. is_safe_script_domain() ergänzt fuer external_scripts Pfad
+--   24. cert_inline_pkcs wird in HTML und Script Kontext korrekt gesetzt
+--   25. Version und Description auf 4.3.7a angehoben
+--
 -- Design:
 --   Die Struktur bleibt nah an v4.3.6d.
 --   HTML bleibt der Hauptpfad.
@@ -18,7 +24,7 @@
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.3.7"
+local VERSION = "4.3.7a"
 
 -- =========================
 -- Config lesen
@@ -41,7 +47,7 @@ local REDACT_LOG_FIELDS                   = (CFG.redact_log_fields ~= false)
 local REQUIRE_SCRIPT_CONTEXT_FOR_EXTERNAL = (CFG.require_script_context_for_external ~= false)
 local REQUIRE_STRONG_GATE_FOR_DECODE      = (CFG.require_strong_gate_for_decode ~= false)
 local MAX_EXTERNAL_REPORTED               = tonumber(CFG.max_external_reported) or 3
-local SOFT_ONLY_SCORE_CAP                 = tonumber(CFG.soft_only_score_cap) or 4.5
+local SOFT_ONLY_SCORE_CAP                 = tonumber(CFG.soft_only_cap or CFG.soft_only_score_cap) or 4.5
 local HEUR_MUL_DEFAULT            = tonumber(CFG.heur_mul_default) or 1.0
 local HEUR_MUL_NEWSLETTER_HEADER  = tonumber(CFG.heur_mul_newsletter_header) or 0.3
 local HEUR_MUL_NEWSLETTER_HEUR    = tonumber(CFG.heur_mul_newsletter_heuristic) or 0.4
@@ -902,6 +908,20 @@ local function map_has_domain(map, host)
   for i = 2, #parts do
     local cand = table.concat(parts, ".", i, #parts)
     if map:get_key(cand) then return true end
+  end
+  return false
+end
+
+local function is_safe_script_domain(u)
+  local host = host_from_url(u)
+  if not host then
+    return false
+  end
+  if UNSAFE_SCRIPT_DOMAINS_MAP and map_has_domain(UNSAFE_SCRIPT_DOMAINS_MAP, host) then
+    return false
+  end
+  if SAFE_SCRIPT_DOMAINS_MAP and map_has_domain(SAFE_SCRIPT_DOMAINS_MAP, host) then
+    return true
   end
   return false
 end
@@ -1816,16 +1836,47 @@ end
 local function scan_certificate_html_module(ctx, html_view)
   if not module_enabled("certificate_smuggling") then return end
   local lc = html_view.scan_lc
-  local has_pem = lc:find("begin certificate", 1, true) or lc:find("begin pkcs7", 1, true) or lc:find("begin x509 certificate", 1, true)
-  if not has_pem and not lc:find("data:application/x%-x509", 1, false) and not lc:find("data:application/pkcs", 1, false) then return end
-  if lc:find("data:application/x%-x509", 1, false) or lc:find("data:application/pkcs", 1, false) then ctx:add_module_reason("certificate_smuggling", "cert_data_uri") end
+
+  local has_pem =
+    lc:find("begin certificate", 1, true) or
+    lc:find("begin x509 certificate", 1, true)
+
+  local has_pkcs =
+    lc:find("begin pkcs7", 1, true) or
+    lc:find("begin pkcs12", 1, true)
+
+  if not has_pem and not has_pkcs
+     and not lc:find("data:application/x%-x509", 1, false)
+     and not lc:find("data:application/pkcs", 1, false) then
+    return
+  end
+
+  if lc:find("data:application/x%-x509", 1, false) or lc:find("data:application/pkcs", 1, false) then
+    ctx:add_module_reason("certificate_smuggling", "cert_data_uri")
+  end
+
+  local suspicious_ctx =
+    Policy.has_smuggling_context(ctx) or
+    lc:find("atob%s*%(", 1, false) or
+    lc:find("blob%s*%(", 1, false) or
+    lc:find("fetch%s*%(", 1, false)
+
   if has_pem then
-    if Policy.has_smuggling_context(ctx) or lc:find("atob%s*%(", 1, false) or lc:find("blob%s*%(", 1, false) or lc:find("fetch%s*%(", 1, false) then
+    if suspicious_ctx then
       ctx:add_module_reason("certificate_smuggling", "cert_inline_pem")
     else
       ctx:add_module_reason("certificate_smuggling", "cert_attachment_file")
     end
   end
+
+  if has_pkcs then
+    if suspicious_ctx then
+      ctx:add_module_reason("certificate_smuggling", "cert_inline_pkcs")
+    else
+      ctx:add_module_reason("certificate_smuggling", "cert_attachment_file")
+    end
+  end
+
   if has_long_base64_sequence(lc, 600) and (lc:find("certificate", 1, true) or lc:find("pkcs", 1, true)) then
     ctx:add_module_reason("certificate_smuggling", "cert_base64_block")
   end
@@ -2081,8 +2132,18 @@ end
 local function scan_certificate_script_module(ctx, script_raw)
   if not module_enabled("certificate_smuggling") then return end
   local lc = (script_raw or ""):lower()
-  if lc:find("begin certificate", 1, true) or lc:find("begin pkcs7", 1, true) then ctx:add_module_reason("certificate_smuggling", "cert_inline_pem") end
-  if has_long_base64_sequence(lc, 600) and (lc:find("certificate", 1, true) or lc:find("pkcs", 1, true)) then ctx:add_module_reason("certificate_smuggling", "cert_base64_block") end
+
+  if lc:find("begin certificate", 1, true) or lc:find("begin x509 certificate", 1, true) then
+    ctx:add_module_reason("certificate_smuggling", "cert_inline_pem")
+  end
+
+  if lc:find("begin pkcs7", 1, true) or lc:find("begin pkcs12", 1, true) then
+    ctx:add_module_reason("certificate_smuggling", "cert_inline_pkcs")
+  end
+
+  if has_long_base64_sequence(lc, 600) and (lc:find("certificate", 1, true) or lc:find("pkcs", 1, true)) then
+    ctx:add_module_reason("certificate_smuggling", "cert_base64_block")
+  end
 end
 
 local function analyze_decoded_blob(ctx, decoded)
@@ -2666,7 +2727,7 @@ if ENABLED then
   reg_marker("HTML_SMUGGLING_MARKER_RC4_DECRYPT",        "HTML smuggling marker: RC4 or symmetric decryption pattern")
   reg_marker("HTML_SMUGGLING_MARKER_PDF_ACTIVE",         "HTML smuggling marker: active PDF content")
   reg_marker("HTML_SMUGGLING_MARKER_SVG_ACTIVE",         "HTML smuggling marker: active SVG content")
-  reg_marker("HTML_SMUGGLING_MARKER_CERT_SMUGGLING",    "HTML smuggling marker: certificate or PKCS smuggling context")
+  reg_marker("HTML_SMUGGLING_MARKER_CERT_SMUGGLING",     "HTML smuggling marker: certificate or PKCS smuggling context")
   reg_marker("HTML_SMUGGLING_CLASS_JS",                  "HTML smuggling class: JavaScript smuggling behaviour")
   reg_marker("HTML_SMUGGLING_CLASS_OBFUS",               "HTML smuggling class: obfuscation detected")
   reg_marker("HTML_SMUGGLING_CLASS_CONTAINER",           "HTML smuggling class: container style payload detected")
