@@ -1,90 +1,275 @@
-# Rspamd HTML Smuggling Detection Suite (v3.3)
+# HTML Smuggling Detection v4.3.7
 
-![Version](https://img.shields.io/badge/Version-3.3-green)
+![Version](https://img.shields.io/badge/Version-4.3.7-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
 ![Security](https://img.shields.io/badge/Focus-Hardened%20Gate%20%26%20Entropy-red)
 
-## Einführung & Vision
-HTML Smuggling v3.3 ist die konsequente Weiterentwicklung der Suite hin zu einer gehärteten Enterprise-Abwehrschicht. Während v3.2 die Deobfuskation perfektionierte, fokussiert sich v3.3 auf Präzision, Rauschunterdrückung und Performance-Härtung für Umgebungen mit extrem hohem Mailaufkommen .
 
-Die Version 3.3 führt das Konzept des "Strong Decode Gate" ein: Rechenintensive Dekodierungs-Operationen werden nur noch eingeleitet, wenn der Skript-Kontext zweifelsfrei auf bösartige Smuggling-Techniken hinweist. In Kombination mit einer neuen Entropie-Analyse und Byte-Array-Sniffing (uint8array) erkennt v3.3 selbst polymorphe Malware, die klassische statische Muster komplett vermeidet.
+## Zweck
 
----
+Dieses Modul erweitert Rspamd um eine praxisnahe Erkennung von HTML Smuggling, verschleierten JavaScript Payloads und ergänzenden Non HTML Vektoren. Die Version 4.3.7 baut auf der 4.3.6d auf und ergänzt zusätzliche Pfade für Attachments, Zertifikats Missbrauch und optionale Bild Indikatoren.
 
-## Technische Kern-Features (v3.3 Updates)
+Das Ziel ist nicht eine forensische Vollanalyse jeder Datei, sondern eine robuste und performante Erkennung typischer Smuggling, Staging und Delivery Muster im Mail Gateway Betrieb.
 
-### 1. Hardened Decode Gate & Context Validation
-Um die False-Positive-Rate bei komplexen, aber legitimen Web-Mails gegen Null zu senken, nutzt v3.3 ein zweistufiges Validierungsverfahren:
-* Strong Gate: Dekodierung findet nur statt, wenn "Smuggling-Werkzeuge" (wie atob, blob, fetch oder MS-AppInstaller) im selben Skript-Kontext aktiv sind.
-* Entropy-Check: Base64-Kandidaten werden vor der Dekodierung auf ihre Informationsdichte geprüft. Nur hochgradig strukturierte Daten (typisch für verschlüsselte oder binäre Payloads) werden weiterverarbeitet.
+## Abgedeckte Bereiche
 
-### 2. Uint8Array & Byte-Stream Sniffing (v3.3)
-Moderne Malware-Stämme nutzen oft keine reinen Base64-Strings mehr, sondern bauen Dateien über binäre Byte-Arrays zusammen:
-* Binary Reconstruction: v3.3 analysiert uint8array-Konstruktoren direkt im JavaScript-Code und erkennt darin versteckte Datenströme.
-* In-Memory Sniffing: Identifiziert binäre Signaturen (Magic Bytes) innerhalb von Byte-Arrays:
-    * WASM & PE: Erkennt WebAssembly-Module und Executables direkt in Array-Daten.
-    * Container: Identifiziert ZIP-Header, PDF-Signaturen und ISO-Fragmente innerhalb von Variablen-Konstrukten.
+Die Version 4.3.7 deckt insbesondere folgende Bereiche ab:
 
-### 3. Advanced API & Marker Suite
-Die Suite überwacht spezialisierte Browser-Schnittstellen und setzt interne Marker für das Rspamd-Scoring:
-* WebCrypto & ServiceWorker: Identifiziert Versuche, Payloads über die Crypto-API zu entschleiern oder persistente Hintergrund-Prozesse zur Infektion zu missbrauchen.
-* QR-Canvas Detection: Erkennt das "Zeichnen" von Malware-Code in unsichtbare HTML5-Canvas-Elemente (QR-Code-Lure).
-* Score Caps: Neue Sicherheits-Caps verhindern, dass rein heuristische Treffer ohne harten Payload-Fund (Soft-Only) kritische Schwellenwerte überschreiten.
+- HTML Smuggling mit JavaScript
+- Base64 Decode Pfade
+- Obfuskation und API Tarnung
+- Uint8Array Payload Konstruktion
+- externe Script Nachladungen
+- CSS Exfiltration und CSS Code Execution Muster
+- Geo Targeting und Evasion
+- ClickFix ähnliche Lures
+- WASM Staging
+- Blockchain oder Web3 Staging
+- PDF Active Content
+- SVG mit aktivem Inhalt
+- CHM, HTA, OneNote, LNK und Script Attachments
+- Zertifikats und PKCS basierte Smuggling Kontexte
+- optionale Bild Indikatoren als Info Only
 
----
+## Nicht oder nur eingeschraenkt abgedeckt
 
-## Das 5-Stage Scoring-System (v3.3)
+Die Version 4.3.7 ist stark fuer Mail Gateway Erkennung optimiert. Folgende Bereiche sind nicht als vollstaendige Tiefenanalyse umgesetzt:
 
-1. Stage 1: Heuristik & API-Scan: Gewichtung von Basis-APIs mit Fokus auf Smuggling-Kontexte.
-2. Stage 2: Deobfuscation & Virtual Payloads: Rekonstruktion fragmentierter Strings (Split-Payloads).
-3. Stage 3: Deep Sniffing & Critical Boost: Sofortige Eskalation bei Fund von Binär-Signaturen (PE, VHDX, WASM).
-4. Stage 4: Combo- & Cross-Logik: Synergien zwischen verschiedenen Detektions-Vektoren.
-5. Stage 5: Trusted Auth Reduction: Validierte Newsletter (DKIM/SPF-Alignment) erhalten eine Score-Reduktion, sofern kein harter Payload-Fund vorliegt.
+- echte Steganographie Analyse in Bildern
+- vollstaendige PDF Objekt Rekonstruktion
+- tiefes Office Parsing mit Makro Extraktion
+- vollstaendige Zertifikats oder PKCS Validierung
+- Headless Nachverfolgung externer URLs
 
----
+Das ist bewusst so gehalten, damit das Modul produktiv auf Rspamd lauffaehig und wartbar bleibt.
 
-## Konfiguration & Datenschutz
+## Hauptmodule
 
-Beispiel-Konfiguration für /etc/rspamd/local.d/html_smuggling.conf:
+### appinstaller
+Erkennt `ms-appinstaller` Kontexte und `.appinstaller` Hinweise.
 
+### js_smuggling
+Erkennt die typischen JavaScript Bausteine wie `atob`, `Blob`, `fetch`, `createObjectURL`, Split Payloads, Timer Verzoegerung und Decode Kontexte.
+
+### obfuscation
+Erkennt Tarnungsmuster wie `fromCharCode`, `_0x...` Variablen, hohe Entropie, Hex Arrays und aehnliche Konstrukte.
+
+### decoded_payload
+Versucht dekodierte Base64 Inhalte zu klassifizieren, zum Beispiel PE, ZIP, ISO, Script, HTML oder WASM.
+
+### uint8array
+Erkennt grosse `Uint8Array` Konstruktionen und prueft Header Hinweise auf PE, WASM, ZIP oder PDF.
+
+### external_scripts
+Erkennt externe Scripts im HTML und bewertet diese nur im passenden Smuggling Kontext.
+
+### css_exfil
+Erkennt missbraeuchliche CSS Konstrukte wie `@import`, `attr()` und grosse Base64 Bloecke in Style Bereichen.
+
+### geo_targeting
+Erkennt Geo APIs, Country Checks und Timezone basierte Selektionslogik.
+
+### evasion
+Erkennt Antisandbox und User Interaction Muster wie `navigator.webdriver`, Hardware Checks und erzwungene Maus oder Keyboard Interaktion.
+
+### persistence
+Erkennt `localStorage` und `sessionStorage` Nutzung im verdaechtigen Kontext.
+
+### domain_rotation
+Erkennt Redirect oder Domain Rotation Logik.
+
+### clickfix
+Erkennt typische ClickFix, Fake CAPTCHA und Run Dialog Lures.
+
+### wasm_staging
+Erkennt WebAssembly als Stage oder Payload Bruecke.
+
+### blockchain_staging
+Erkennt Web3 oder Ethers basierte Payload oder Remote Stage Muster.
+
+### css_code_execution
+Erkennt Konstrukte, bei denen CSS Inhalte spaeter durch JavaScript ausgelesen und missbraucht werden.
+
+### attachment_vectors
+Neu in v4.3.7. Erkennt Non HTML und Attachment Vektoren wie:
+- PDF mit `/JavaScript`, `/OpenAction`, `/Launch`, `/EmbeddedFile`, `/RichMedia`
+- SVG mit `<script>`, `onload`, `foreignObject`, `xlink:href`, `data:` Kontext
+- CHM
+- HTA
+- OneNote
+- LNK
+- Script Dateien wie JS, VBS, PS1, BAT, CMD
+- Office Macro Container wie DOCM, XLSM, PPTM
+
+### certificate_smuggling
+Neu in v4.3.7. Erkennt:
+- inline PEM Bloecke
+- PKCS Hinweise
+- Zertifikats Dateitypen
+- `data:` Kontexte mit Zertifikats oder PKCS Bezug
+- grosse Base64 Bloecke im Zertifikats Kontext
+
+### image_smuggling_info
+Neu in v4.3.7. Standardmaessig deaktiviert und als Info Only gedacht. Erkennt nur einfache Indikatoren, keine echte Steganographie.
+
+## Standardmaessige Modul Defaults
+
+Die wichtigsten Defaults in v4.3.7 sind:
+
+- `attachment_vectors = enabled`
+- `certificate_smuggling = enabled`
+- `image_smuggling_info = disabled`
+- `push_abuse = info_only`
+
+## Beispiel fuer eine lokale Konfiguration
+
+Datei zum Beispiel unter:
+
+`/etc/rspamd/local.d/html_smuggling.conf`
+
+~~~lua
 html_smuggling {
   enabled = true;
+  debug = false;
+  test_mode = false;
+
+  log_score_threshold = 5.0;
+  force_extended_log = true;
+  force_extended_log_min_score = 5.0;
+  log_simple_line = true;
+  score_debug = false;
+  enable_phase_debug = false;
+
   max_final_score = 15.0;
   soft_only_score_cap = 4.5;
-  redact_log_fields = true;
+  critical_boost = 0.0;
+  min_score = 0.0;
+
+  require_script_context_for_external = true;
   require_strong_gate_for_decode = true;
 
-  limits {
-    script {
-      max_total_script_scan = 120000;
-      max_script_time_ms = 80.0;
+  modules {
+    attachment_vectors {
+      enabled = true;
+      info_only = false;
+    }
+    certificate_smuggling {
+      enabled = true;
+      info_only = false;
+    }
+    image_smuggling_info {
+      enabled = false;
+      info_only = true;
+    }
+    rc4_detection {
+      enabled = false;
+      info_only = false;
+    }
+    wasm_binary_analysis {
+      enabled = false;
+      info_only = false;
     }
   }
-
-  weights {
-    wasm_uint8array = 8.0;
-    pe_uint8array = 10.0;
-  }
 }
+~~~
 
----
+## Installation
 
-## Performance & Härtung
-* Deduplizierte Kandidaten: Identische Base64-Blobs werden über verschiedene Blöcke hinweg nur einmal gescannt (Hash-basiert).
-* Privacy-Friendly Logging: Sensible Daten (Message-ID, Subject) werden in den Logs standardmäßig anonymisiert (Redaction).
-* Slow-Log: Protokolliert Skripte, die das Zeitbudget überschreiten, für das Performance-Monitoring.
+Die Lua Datei liegt produktiv typischerweise hier:
 
----
+`/etc/rspamd/lua.local.d/html_smuggling.lua`
 
-## Neu in Version 3.3 gegenüber v3.2
-* [x] Entropy Validation: Verhindert das Scannen von Zufalls-Rauschen.
-* [x] Uint8Array Sniffing: Detektion von Malware in JavaScript-Byte-Arrays.
-* [x] Strong Gate Logic: Kontext-Prüfung vor jeder Dekodierung.
-* [x] Trusted Auth Reduction: Volle Integration von SPF/DKIM-Alignment.
-* [x] Privacy Redaction: DSGVO-konforme Protokollierung in den Logs.
+Danach sollte die Konfiguration geprueft werden:
 
-Version: 3.3 (März 2026)
-Status: Enterprise Stable
-Lizenz: MIT
+~~~bash
+rspamadm configtest
+~~~
 
-v3.3 ist die ultimative Antwort auf polymorphe HTML-Smuggling-Angriffe und deklassiert herkömmliche Cloud-Filter technologisch.
+Anschliessend Rspamd neu laden oder neu starten:
+
+~~~bash
+systemctl restart rspamd
+~~~
+
+oder je nach Umgebung:
+
+~~~bash
+systemctl reload rspamd
+~~~
+
+## Empfohlene Inbetriebnahme
+
+Fuer einen sauberen Rollout empfiehlt sich dieses Vorgehen:
+
+1. Erst mit `test_mode = true` starten.
+2. Logging fuer einige Tage beobachten.
+3. False Positives gegen reale Newsletter, Marketing Mails und interne Systeme pruefen.
+4. Danach in den produktiven Modus wechseln.
+5. Gewichte und Caps nur gezielt anpassen, nicht pauschal.
+
+## Ergebnis und Symbolik
+
+Das Hauptsymbol ist:
+
+`HTML_SMUGGLING_PAYLOAD`
+
+Zusaetzlich werden Marker gesetzt, zum Beispiel:
+
+- `HTML_SMUGGLING_MARKER_PDF_ACTIVE`
+- `HTML_SMUGGLING_MARKER_SVG_ACTIVE`
+- `HTML_SMUGGLING_MARKER_CERT_SMUGGLING`
+- `HTML_SMUGGLING_MARKER_CLICKFIX`
+- `HTML_SMUGGLING_MARKER_WASM_STAGING`
+- `HTML_SMUGGLING_CLASS_CRITICAL`
+
+Diese Marker helfen fuer Logging, Policies, Reports und spaetere Auswertungen.
+
+## Wichtige Betriebs Hinweise
+
+### 1. Performance
+Das Modul ist auf produktive Laufzeit optimiert. Trotzdem sollte es auf echten Mail Daten beobachtet werden, speziell bei:
+- grossen HTML Newslettern
+- stark obfuskierten HTML Dateien
+- vielen Attachments pro Nachricht
+
+### 2. False Positives
+Besonders im Blick behalten:
+- Marketing und Newsletter Systeme
+- SVG Dateien aus legitimen Design Tools
+- PDF Dokumente mit aktiven Formular oder Medien Elementen
+- technische Zertifikats Mails aus PKI oder Monitoring Umgebungen
+
+### 3. Zertifikats Erkennung
+Die Zertifikats Erkennung ist absichtlich konservativ. Eine legitime Zertifikats Mail kann Hinweise setzen. Entscheidend ist der Kontext mit Base64, Script, Blob, Fetch oder Data URI Missbrauch.
+
+### 4. Bild Missbrauch
+Das Modul `image_smuggling_info` ist nur ein Hinweis Modul. Es liefert keine verlaessliche Steganographie Erkennung.
+
+## Was v4.3.7 verbessert
+
+Im Vergleich zur 4.3.6d bringt v4.3.7 vor allem:
+
+- bessere Abdeckung fuer Non HTML Angriffe
+- mehr Sichtbarkeit auf smuggling relevante Attachments
+- Erkennung von PDF Active Content
+- Erkennung von aktivem SVG Missbrauch
+- einfache Zertifikats und PKCS Kontexte
+- optionale Bild Hinweise fuer spaetere Erweiterung
+
+## Grenzen der Erkennung
+
+Die Version 4.3.7 erreicht in der Praxis eine deutlich breitere Abdeckung als die 4.3.6d. Trotzdem ersetzt sie keine Sandbox und keine tiefgehende Dateianalyse. Fuer hoch entwickelte Kampagnen mit echter Bild Steganographie, komplexem PDF Objekt Missbrauch oder mehrstufigem Remote Staging bleiben zusaetzliche Kontrollen sinnvoll.
+
+## Empfehlung fuer produktiven Betrieb
+
+Fuer ein sauberes Setup im Gateway Betrieb ist diese Kombination sinnvoll:
+
+- Rspamd mit v4.3.7 als fruehe Erkennung
+- URL Reputation und URL Rewrite Kontrollen
+- Attachment Policy fuer CHM, HTA, LNK, OneNote und Script Dateien
+- AV oder Sandbox fuer tiefe Dateianalyse
+- separates Monitoring fuer False Positives und neue Taktiken
+
+## Kurzfazit
+
+Die v4.3.7 ist eine saubere, produktionsnahe Weiterentwicklung der 4.3.6d. Sie bleibt wartbar, erweitert aber die Erkennung spuerbar in Richtung moderner Non HTML und Attachment Vektoren. Fuer einen produktiven Mail Gateway Betrieb ist das ein guter, ausgewogener Stand zwischen Abdeckung, Performance und Pflegeaufwand.
