@@ -1,6 +1,5 @@
-
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.3.7b
+-- HTML Smuggling Detection v4.3.7c-r3
 --
 -- Erweiterungen gegenueber v4.3.6d:
 --   15. attachment_vectors Modul fuer Non HTML und Attachment Vektoren
@@ -13,18 +12,16 @@
 --
 -- Fixes gegenueber v4.3.7:
 --   22. soft_only_cap wird korrekt aus CFG.soft_only_cap gelesen
---   23. is_safe_script_domain() ergänzt fuer external_scripts Pfad
+--   23. is_safe_script_domain() ergaenzt fuer external_scripts Pfad
 --   24. cert_inline_pkcs wird in HTML und Script Kontext korrekt gesetzt
 --   25. Version und Description auf 4.3.7a angehoben
 --
--- Fixes gegenueber v4.3.7a (v4.3.7b):
---   26. Array-Join-Resolver in advanced_deobfuscate: erkennt var x=["f1","f2",...]; x.join('')
---       und liefert den zusammengesetzten String als virtuellen Kandidaten an den Decoder
---   27. Separater join_virtuals_added Zaehler damit virtual_max_payloads Join-Hits nicht verdraengt
---   28. MAX_JOIN_ARRAY_PARTS=20 statt join_max_parts=5 fuer Array-Literal Resolver
---   29. Array-Join-Resolver laeuft auf script_view.raw (nicht smart_text_scan Chunk)
---       damit Array-Literale in der Mitte grosser Scripts nicht weggeschnitten werden
---   30. base64_quality_score Bypass fuer Join-Virtuals (direkt via is_frag_base64ish)
+-- Fixes gegenueber v4.3.7a und v4.3.7b in v4.3.7c-r3:
+--   26. Array-Join-Resolver in advanced_deobfuscate bleibt aktiv fuer var x=["f1","f2",...]; x.join('')
+--   27. Kleine Labor und Stager Payloads werden wieder decodiert, min_decode_total Standard auf 400 gesenkt
+--   28. detect_split_payload erkennt jetzt auch Array-Join Konstrukte robust
+--   29. scan_decoded_payload_module nutzt ein explizites min_decode_total Fallback von 400
+--   30. Join-Pattern zaehlt fuer Marker und Summary konsistent auch bei wenigen Fragmenten
 --
 -- Design:
 --   Die Struktur bleibt nah an v4.3.6d.
@@ -34,7 +31,7 @@
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.3.7b"
+local VERSION = "4.3.7c-r3"
 
 -- =========================
 -- Config lesen
@@ -1797,21 +1794,73 @@ end
 
 local function detect_split_payload(html)
   if not html or #html < 120 then return false end
-  local cnt, vars = 0, {}
+
+  local lc = html:lower()
+  local has_sink =
+    lc:find("atob%s*%(", 1, false) or
+    lc:find("blob%s*%(", 1, false) or
+    lc:find("createobjecturl", 1, true) or
+    lc:find("fetch%s*%(", 1, false)
+
+  if not has_sink then
+    return false
+  end
+
   local min_parts = tonumber(LSCRIPT.split_payload_min_vars) or 6
+
+  local cnt, vars = 0, {}
   local function register_decl(varname, value)
     if not varname or not value then return end
     value = (value or ""):gsub("%s+", "")
     if not is_frag_base64ish(value) or #value < 8 or vars[varname] then return end
-    vars[varname] = true; cnt = cnt + 1
+    vars[varname] = true
+    cnt = cnt + 1
   end
+
   local function scan_keyword(keyword)
-    for varname, value in html:gmatch(keyword .. "%s+([%w_]+)%s*=%s*'([^']*)'") do register_decl(varname, value) end
-    for varname, value in html:gmatch(keyword .. '%s+([%w_]+)%s*=%s*"([^"]*)"') do register_decl(varname, value) end
+    for varname, value in html:gmatch(keyword .. "%s+([%w_]+)%s*=%s*'([^']*)'") do
+      register_decl(varname, value)
+    end
+    for varname, value in html:gmatch(keyword .. '%s+([%w_]+)%s*=%s*"([^"]*)"') do
+      register_decl(varname, value)
+    end
   end
-  scan_keyword("var"); scan_keyword("let"); scan_keyword("const")
-  local has_concat = html:find("%+=", 1, false) or html:find("%.join%s*%(", 1, false) or html:find("atob%s*%(", 1, false) or html:find("blob%s*%(", 1, false) or html:find("createobjecturl", 1, true)
-  return cnt >= min_parts and has_concat
+
+  scan_keyword("var")
+  scan_keyword("let")
+  scan_keyword("const")
+
+  if cnt >= min_parts and (html:find("%+=", 1, false) or html:find("%.join%s*%(", 1, false)) then
+    return true
+  end
+
+  -- FIX v4.3.7c-r3: Array-Join Konstrukte robust erkennen
+  -- var/let/const name = ["frag1","frag2",...]; name.join('')
+  local function check_array_join(pattern)
+    for arr_name, arr_body in html:gmatch(pattern) do
+      if html:find(arr_name .. "%s*%.%s*join%s*%(", 1, false) then
+        local frag_count = 0
+        for frag in arr_body:gmatch('"([^"]*)"') do
+          local f = (frag or ""):gsub("%s+", "")
+          if is_frag_base64ish(f) and #f >= 8 then frag_count = frag_count + 1 end
+        end
+        if frag_count == 0 then
+          for frag in arr_body:gmatch("'([^']*)'") do
+            local f = (frag or ""):gsub("%s+", "")
+            if is_frag_base64ish(f) and #f >= 8 then frag_count = frag_count + 1 end
+          end
+        end
+        if frag_count >= 2 then return true end
+      end
+    end
+    return false
+  end
+
+  if check_array_join("[Vv][Aa][Rr]%s+([%w_]+)%s*=%s*%[([^%]]+)%]") then return true end
+  if check_array_join("[Ll][Ee][Tt]%s+([%w_]+)%s*=%s*%[([^%]]+)%]") then return true end
+  if check_array_join("[Cc][Oo][Nn][Ss][Tt]%s+([%w_]+)%s*=%s*%[([^%]]+)%]") then return true end
+
+  return false
 end
 
 local function collect_timer_positions(lc)
@@ -2313,8 +2362,15 @@ local function collect_script_meta(script_view)
   local maybe_web3   = sl:find("ethers", 1, true) ~= nil or sl:find("web3", 1, true) ~= nil or sl:find("ethereum", 1, true) ~= nil
   local maybe_css    = sl:find("getcomputedstyle", 1, true) ~= nil
   local maybe_rc4    = sl:find("rc4", 1, true) ~= nil or sl:find("ksa", 1, true) ~= nil or sl:find("prga", 1, true) ~= nil or (sl:find("decrypt", 1, true) ~= nil and sl:find("key", 1, true) ~= nil)
-  -- FIX v4.3.7b: maybe_array_join als zusaetzlicher Trigger fuer allow_decode_path
-  local maybe_array_join = sl:find("%.join%s*%(", 1, false) ~= nil and sl:find("%[", 1, false) ~= nil
+  -- FIX v4.3.7c-r3: maybe_array_join robuster - .join( muss mit Array-Deklaration kombiniert sein
+  local maybe_array_join =
+    (sl:find("%.join%s*%(", 1, false) ~= nil) and
+    (
+      sl:find("%[%s*['\"]", 1, false) ~= nil or
+      sl:find("var%s+[%w_]+%s*=%s*%[", 1, false) ~= nil or
+      sl:find("let%s+[%w_]+%s*=%s*%[", 1, false) ~= nil or
+      sl:find("const%s+[%w_]+%s*=%s*%[", 1, false) ~= nil
+    )
   return {
     maybe_b64 = maybe_b64, maybe_concat = maybe_concat, maybe_obfus = maybe_obfus,
     maybe_uint8 = maybe_uint8, maybe_hex = maybe_hex, maybe_wasm = maybe_wasm,
@@ -2359,7 +2415,8 @@ local function scan_decoded_payload_module(ctx, script_raw, meta)
   if total_b64_len >= (LB64.big_threshold or 5000) then ctx:add_module_reason("js_smuggling", "b64_total_len_big") end
   if total_b64_len >= (LB64.huge_threshold or 20000) then ctx:add_module_reason("js_smuggling", "b64_total_len_huge") end
   if #cands > 1 then ctx:add_module_reason("js_smuggling", "b64_joined_parts") end
-  if total_b64_len < (LB64.min_decode_total or 1500) then return end
+  local min_decode_total = tonumber(LB64.min_decode_total) or 400
+  if total_b64_len < min_decode_total then return end
   if REQUIRE_STRONG_GATE_FOR_DECODE and not Policy.has_strong_decode_gate(ctx) then ctx:add_info("decode_gate_not_strong_enough"); return end
   for _, cand in ipairs(cands) do
     local nb = normalize_b64(cand)
