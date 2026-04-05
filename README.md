@@ -1,6 +1,6 @@
-# HTML Smuggling Detection v4.3.7
+# HTML Smuggling Detection v4.4.0
 
-![Version](https://img.shields.io/badge/Version-4.3.7-green)
+![Version](https://img.shields.io/badge/Version-4.4.0-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
 ![Security](https://img.shields.io/badge/Focus-Hardened%20Gate%20%26%20Entropy-red)
 
@@ -13,7 +13,7 @@ Das Ziel ist nicht eine forensische Vollanalyse jeder Datei, sondern eine robust
 
 ## Abgedeckte Bereiche
 
-Die Version 4.3.7 deckt insbesondere folgende Bereiche ab:
+Die Version v4.4.0 deckt insbesondere folgende Bereiche ab:
 
 - HTML Smuggling mit JavaScript
 - Base64 Decode Pfade
@@ -33,7 +33,7 @@ Die Version 4.3.7 deckt insbesondere folgende Bereiche ab:
 
 ## Nicht oder nur eingeschraenkt abgedeckt
 
-Die Version 4.3.7 ist stark fuer Mail Gateway Erkennung optimiert. Folgende Bereiche sind nicht als vollstaendige Tiefenanalyse umgesetzt:
+Die Version v4.4.0 ist stark fuer Mail Gateway Erkennung optimiert. Folgende Bereiche sind nicht als vollstaendige Tiefenanalyse umgesetzt:
 
 - echte Steganographie Analyse in Bildern
 - vollstaendige PDF Objekt Rekonstruktion
