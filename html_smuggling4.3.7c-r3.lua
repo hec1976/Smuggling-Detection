@@ -874,8 +874,8 @@ local function safe_decode_base64(task, b64, limit)
   end)
 
   if not ok or res == nil then
-    if task then
-      rspamd_logger.warnx(task, "Base64 decode failed")
+    if task and (DEBUG or DECODE_DEBUG) then
+      rspamd_logger.debugx(task, "Base64 decode failed")
     end
     return nil
   end
@@ -2855,17 +2855,18 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
     total_b64_len = total_b64_len + #(tostring(cand):gsub("%s+", ""))
   end
 
+  local min_decode_total = tonumber(LB64.min_decode_total) or 400
+
   decode_dbg(
     ctx.task,
     "HTML_SMUGGLING_DBG || total_b64_len=%d min_decode_total=%d cands_total=%d",
-    total_b64_len, tonumber(LB64.min_decode_total) or 400, #cands
+    total_b64_len, min_decode_total, #cands
   )
 
   if total_b64_len >= (LB64.big_threshold or 5000) then ctx:add_module_reason("js_smuggling", "b64_total_len_big") end
   if total_b64_len >= (LB64.huge_threshold or 20000) then ctx:add_module_reason("js_smuggling", "b64_total_len_huge") end
   if #cands > 1 then ctx:add_module_reason("js_smuggling", "b64_joined_parts") end
 
-  local min_decode_total = tonumber(LB64.min_decode_total) or 400
   if total_b64_len < min_decode_total then
     decode_dbg(
       ctx.task,
@@ -2874,7 +2875,7 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
     )
     return
   end
-
+  
   if REQUIRE_STRONG_GATE_FOR_DECODE and not Policy.has_strong_decode_gate(ctx) then
     decode_dbg(ctx.task, "HTML_SMUGGLING_DBG || STOP: decode_gate_not_strong_enough")
     ctx:add_info("decode_gate_not_strong_enough")
