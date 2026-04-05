@@ -441,11 +441,11 @@ local DEFAULT_REASON_POLICY = {
   web3_api_usage             = { class = "SUSPICIOUS_API" },
   ethers_contract_payload    = { class = "SUSPICIOUS_API" },
   web3_eth_call              = { class = "SUSPICIOUS_API" },
-  att_pdf_javascript         = { class = "SUSPICIOUS_API" },
-  att_pdf_openaction         = { class = "SUSPICIOUS_API" },
-  att_pdf_launch             = { class = "SUSPICIOUS_API" },
-  att_pdf_embeddedfile       = { class = "SUSPICIOUS_API" },
-  att_pdf_richmedia          = { class = "SUSPICIOUS_API" },
+  att_pdf_javascript   = { class = "SUSPICIOUS_API" },
+  att_pdf_openaction   = { class = "SUSPICIOUS_API" },
+  att_pdf_launch       = { class = "CONTAINER" },
+  att_pdf_embeddedfile = { class = "CONTAINER" },
+  att_pdf_richmedia    = { class = "SUSPICIOUS_API" }, 
   att_svg_script             = { class = "SUSPICIOUS_API" },
   att_svg_event_handler      = { class = "SUSPICIOUS_API" },
   att_svg_foreignobject      = { class = "SUSPICIOUS_API" },
@@ -810,7 +810,7 @@ local function decode_dbg(task, fmt, ...)
 end
 
 local function elapsed_ms(t0)
-  return (rspamd_util.get_ticks() - t0) * 1000.0
+  return (rspamd_util.get_time() - t0) * 1000.0
 end
 
 local function normalize_text(s)
@@ -1153,7 +1153,7 @@ function Detector.new(task)
   self.heur_mul = 1.0
   self.deep_scan = true
   self.total_script_scanned = 0
-  self.started_at = rspamd_util.get_ticks()
+  self.started_at = rspamd_util.get_time()
   self.phase = {
     html_parts_seen = 0, html_parts_scanned = 0,
     attach_parts_seen = 0, attach_parts_scanned = 0,
@@ -1324,7 +1324,7 @@ local function extract_b64_candidates(text, max_candidates_override)
   if #text > max_in then text = text:sub(1, max_in) end
   local max_cand = tonumber(max_candidates_override) or (LB64.max_candidates or 6)
   local min_len  = tonumber(LB64.min_len) or 200
-  local start_time = rspamd_util.get_ticks()
+  local start_time = rspamd_util.get_time()
   local budget_ms  = tonumber(THRESHOLDS.b64_extract_loop_budget_ms) or 25.0
   local iter_count = 0
   for raw in text:gmatch("[A-Za-z0-9%+/_=-]+") do
@@ -1355,7 +1355,7 @@ local function advanced_deobfuscate(script, timeout_ms)
   if not script or #script < 30 then return script, {}, 0 end
   local max_len = tonumber(LSCRIPT.max_script_len) or 80000
   if #script > max_len then script = script:sub(1, max_len) end
-  local t0 = rspamd_util.get_ticks()
+  local t0 = rspamd_util.get_time()
   local budget = tonumber(timeout_ms) or tonumber(LSCRIPT.deobfus_timeout_ms) or 50.0
   local timeout_flag = 0
   local function timed_out(op_cnt)
@@ -2414,35 +2414,162 @@ local function analyze_decoded_blob(ctx, decoded)
     ctx:add_module_reason("js_smuggling", "dec_bin")
     return
   end
-  
+
   local function add_decoded(mod, reason, critical)
     ctx:add_module_reason(mod, reason)
-    if critical then ctx:set_critical(critical) end
+    if critical then
+      ctx:set_critical(critical)
+    end
   end
-  if kind == "PE" then add_decoded("decoded_payload", "dec_pe", "PE"); ctx:add_info("single_sniff_pe"); return end
-  if kind == "WASM" then add_decoded("decoded_payload", "dec_wasm", "WASM"); scan_wasm_binary_module(ctx, decoded); return end
-  if kind == "XML" then
-    if ctx:has_reason("ms_appinstaller_uri") or ctx:has_reason("appinstaller_file") then add_decoded("appinstaller", "dec_xml_appinstaller", "XML_APPINSTALLER")
-    else ctx:add_module_reason("js_smuggling", "dec_xml") end
+
+  if kind == "PE" then
+    add_decoded("decoded_payload", "dec_pe", "PE")
+    ctx:add_info("single_sniff_pe")
     return
   end
-  if kind == "VHDX" then add_decoded("decoded_payload", "dec_vhdx", "VHDX"); return end
-  if kind == "ISO"  then add_decoded("decoded_payload", "dec_iso",  "ISO"); return end
-  if kind == "LNK"  then add_decoded("decoded_payload", "dec_lnk",  "LNK"); return end
-  if kind == "OLE"  then add_decoded("decoded_payload", "dec_ole",  "OLE"); return end
-  if kind == "MSIX" then add_decoded("decoded_payload", "dec_msix", "MSIX"); return end
-  if kind == "APPX" then add_decoded("decoded_payload", "dec_appx", "APPX"); return end
-  if kind == "CAB"  then add_decoded("decoded_payload", "dec_cab",  "CAB"); return end
-  if kind == "7ZIP" then add_decoded("decoded_payload", "dec_7zip", "7ZIP"); return end
-  if kind == "RAR"  then add_decoded("decoded_payload", "dec_rar",  "RAR"); return end
-  if kind == "ZIP"  then add_decoded("decoded_payload", "dec_zip",  "ZIP"); return end
-  if kind == "CHM"  then add_decoded("attachment_vectors", "att_chm_attachment", "CHM"); return end
-  if kind == "HTA"  then add_decoded("attachment_vectors", "att_hta_attachment", "SCRIPT"); return end
-  if kind == "PDF"  then ctx:add_module_reason("js_smuggling", "dec_pdf"); return end
-  if kind == "SVG"  then ctx:add_module_reason("attachment_vectors", "att_svg_smuggling_context"); return end
-  if kind == "VBS" or kind == "PS1" or kind == "BAT" then add_decoded("decoded_payload", "dec_script", "SCRIPT"); return end
-  if kind == "JS"  then ctx:add_module_reason("js_smuggling", "dec_js"); return end
-  if kind == "HTML" then ctx:add_module_reason("js_smuggling", "dec_html"); return end
+
+  if kind == "WASM" then
+    add_decoded("decoded_payload", "dec_wasm", "WASM")
+    scan_wasm_binary_module(ctx, decoded)
+    return
+  end
+
+  if kind == "XML" then
+    if ctx:has_reason("ms_appinstaller_uri") or ctx:has_reason("appinstaller_file") then
+      add_decoded("appinstaller", "dec_xml_appinstaller", "XML_APPINSTALLER")
+    else
+      ctx:add_module_reason("js_smuggling", "dec_xml")
+    end
+    return
+  end
+
+  if kind == "VHDX" then
+    add_decoded("decoded_payload", "dec_vhdx", "VHDX")
+    return
+  end
+
+  if kind == "ISO" then
+    add_decoded("decoded_payload", "dec_iso", "ISO")
+    return
+  end
+
+  if kind == "LNK" then
+    add_decoded("decoded_payload", "dec_lnk", "LNK")
+    return
+  end
+
+  if kind == "OLE" then
+    add_decoded("decoded_payload", "dec_ole", "OLE")
+    return
+  end
+
+  if kind == "MSIX" then
+    add_decoded("decoded_payload", "dec_msix", "MSIX")
+    return
+  end
+
+  if kind == "APPX" then
+    add_decoded("decoded_payload", "dec_appx", "APPX")
+    return
+  end
+
+  if kind == "CAB" then
+    add_decoded("decoded_payload", "dec_cab", "CAB")
+    return
+  end
+
+  if kind == "7ZIP" then
+    add_decoded("decoded_payload", "dec_7zip", "7ZIP")
+    return
+  end
+
+  if kind == "RAR" then
+    add_decoded("decoded_payload", "dec_rar", "RAR")
+    return
+  end
+
+  if kind == "ZIP" then
+    add_decoded("decoded_payload", "dec_zip", "ZIP")
+    return
+  end
+
+  if kind == "CHM" then
+    add_decoded("attachment_vectors", "att_chm_attachment", "CHM")
+    return
+  end
+
+  if kind == "HTA" then
+    add_decoded("attachment_vectors", "att_hta_attachment", "SCRIPT")
+    return
+  end
+
+  if kind == "PDF" then
+    ctx:add_module_reason("js_smuggling", "dec_pdf")
+
+    local pdf_lc = lower_limit_text(decoded, LSCAN.max_attachment_text)
+
+    if pdf_lc:find("/javascript", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_javascript")
+    end
+    if pdf_lc:find("/openaction", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_openaction")
+    end
+    if pdf_lc:find("/launch", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_launch")
+    end
+    if pdf_lc:find("/embeddedfile", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_embeddedfile")
+    end
+    if pdf_lc:find("/richmedia", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_richmedia")
+    end
+
+    return
+  end
+
+  if kind == "SVG" then
+    ctx:add_module_reason("attachment_vectors", "att_svg_smuggling_context")
+
+    local svg_lc = lower_limit_text(decoded, LSCAN.max_attachment_text)
+    if svg_lc:find("<script", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_script")
+    end
+    if svg_lc:find("onload=", 1, true) or
+       svg_lc:find("onbegin=", 1, true) or
+       svg_lc:find("onclick=", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_event_handler")
+    end
+    if svg_lc:find("foreignobject", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_foreignobject")
+    end
+    if svg_lc:find("xlink:href", 1, true) or
+       svg_lc:find('href="javascript:', 1, true) or
+       svg_lc:find("href='javascript:", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_xlink_href")
+    end
+    if svg_lc:find("data:", 1, true) and
+       (svg_lc:find("base64", 1, true) or svg_lc:find("javascript", 1, true)) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_data_uri")
+    end
+
+    return
+  end
+
+  if kind == "VBS" or kind == "PS1" or kind == "BAT" then
+    add_decoded("decoded_payload", "dec_script", "SCRIPT")
+    return
+  end
+
+  if kind == "JS" then
+    ctx:add_module_reason("js_smuggling", "dec_js")
+    return
+  end
+
+  if kind == "HTML" then
+    ctx:add_module_reason("js_smuggling", "dec_html")
+    return
+  end
+
   ctx:add_module_reason("js_smuggling", "dec_bin")
 end
 
@@ -2734,7 +2861,7 @@ end
 local function scan_script_blocks(ctx, html_view, script_entries)
   if not ctx.deep_scan or not Policy.should_deep_scan_scripts(ctx, html_view) then return end
   local selected = select_top_script_entries(script_entries, LSCRIPT.max_check or 3)
-  local script_loop_start = rspamd_util.get_ticks()
+  local script_loop_start = rspamd_util.get_time()
   for _, entry in ipairs(selected) do
     ctx.phase.script_blocks_seen = ctx.phase.script_blocks_seen + 1
     if is_script_budget_exceeded(ctx, script_loop_start) then break end
