@@ -1,6 +1,9 @@
 # create_realistic_test_suite.ps1
-# Erstellt 30 realistische HTML Testdateien fuer HTML Smuggling Detection v4.3.7a
-# Deckt alle Module ab: JS Smuggling, Obfuscation, WASM, PDF, SVG, Certificates, Images, Attachments
+# Erstellt 30 realistische HTML Testdateien für HTML Smuggling Detection v4.3.7c-r4.1
+# Ziel:
+#   Alle relevanten Base64 Testpayloads so erzeugen, dass sie die Decode Gates erfüllen:
+#     LB64.min_len = 200
+#     LB64.min_decode_total = 400
 # Ausgabe: UTF-8 ohne BOM
 
 param(
@@ -11,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 Write-Host "╔══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   REALISTIC HTML Smuggling Test Suite v2.1 fuer Rspamd v4.3.7a                      ║" -ForegroundColor Cyan
+Write-Host "║   REALISTIC HTML Smuggling Test Suite v2.2 für Rspamd v4.3.7c-r4.1                  ║" -ForegroundColor Cyan
 Write-Host "║   Module: JS Smuggling | Obfuscation | WASM | PDF | SVG | Certificates | Images    ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
@@ -19,6 +22,10 @@ Write-Host ""
 $testFolderName = 'HTML_Smuggling_TestSuite_v2'
 $outputRoot = Join-Path -Path (Get-Location).Path -ChildPath $testFolderName
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+# Decoder Gates aus der Lua Logik
+$MinDecodeBase64Chars = 400
+$TargetPayloadBytes = 320   # 320 Bytes ergeben 428 Base64 Zeichen und liegen damit sicher über 400
 
 if (-not (Test-Path -LiteralPath $outputRoot)) {
   New-Item -ItemType Directory -Path $outputRoot | Out-Null
@@ -44,12 +51,75 @@ function Join-ByteArrays {
   }
 }
 
+function Ensure-MinimumByteLength {
+  param(
+    [Parameter(Mandatory)]
+    [byte[]]$Bytes,
+
+    [int]$MinimumBytes = 320,
+
+    [byte]$PadByte = 0x41
+  )
+
+  if ($Bytes.Length -ge $MinimumBytes) {
+    return $Bytes
+  }
+
+  $pad = New-Object byte[] ($MinimumBytes - $Bytes.Length)
+  for ($i = 0; $i -lt $pad.Length; $i++) {
+    $pad[$i] = $PadByte
+  }
+
+  return (Join-ByteArrays -Arrays @($Bytes, $pad))
+}
+
 function Convert-BytesToBase64 {
   param(
     [Parameter(Mandatory)]
-    [byte[]]$Bytes
+    [byte[]]$Bytes,
+
+    [int]$MinimumBytes = 320,
+
+    [byte]$PadByte = 0x41
   )
-  return [Convert]::ToBase64String($Bytes)
+
+  $normalized = Ensure-MinimumByteLength -Bytes $Bytes -MinimumBytes $MinimumBytes -PadByte $PadByte
+  return [Convert]::ToBase64String($normalized)
+}
+
+function Convert-TextToBase64MinSize {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Text,
+
+    [int]$MinimumBytes = 320,
+
+    [string]$PadChunk = "`r`n/* PAD_FOR_HTML_SMUGGLING_TEST_SUITE_0123456789ABCDEF */"
+  )
+
+  $buffer = $Text
+  while ([System.Text.Encoding]::UTF8.GetByteCount($buffer) -lt $MinimumBytes) {
+    $buffer += $PadChunk
+  }
+
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($buffer)
+  return [Convert]::ToBase64String($bytes)
+}
+
+function Assert-MinBase64Length {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Name,
+
+    [Parameter(Mandatory)]
+    [string]$Base64,
+
+    [int]$MinimumChars = 400
+  )
+
+  if ($Base64.Length -lt $MinimumChars) {
+    throw "$Name ist zu kurz für den Decode Gate. Länge=$($Base64.Length), Minimum=$MinimumChars"
+  }
 }
 
 function Write-Utf8NoBomFile {
@@ -98,7 +168,7 @@ function New-FakePEHeader {
     [byte[]]$full = Join-ByteArrays -Arrays @($full, $padding)
   }
 
-  return (Convert-BytesToBase64 -Bytes $full)
+  return (Convert-BytesToBase64 -Bytes $full -MinimumBytes $TargetPayloadBytes)
 }
 
 function New-FakeWASMModule {
@@ -110,12 +180,7 @@ function New-FakeWASMModule {
     [byte[]](0x0A,0x04,0x01,0x02,0x00,0x0B)
   )
 
-  if ($wasm.Length -lt 256) {
-    $padding = New-Object byte[] (256 - $wasm.Length)
-    [byte[]]$wasm = Join-ByteArrays -Arrays @($wasm, $padding)
-  }
-
-  return (Convert-BytesToBase64 -Bytes $wasm)
+  return (Convert-BytesToBase64 -Bytes $wasm -MinimumBytes $TargetPayloadBytes)
 }
 
 function New-FakeZipContainer {
@@ -126,7 +191,7 @@ function New-FakeZipContainer {
     0x74,0x65,0x73,0x74,0x2E,0x74,0x78,0x74,0x54,0x45,
     0x53,0x54,0x44,0x41,0x54,0x41
   )
-  return (Convert-BytesToBase64 -Bytes $zip)
+  return (Convert-BytesToBase64 -Bytes $zip -MinimumBytes $TargetPayloadBytes)
 }
 
 function New-FakeCHM {
@@ -134,7 +199,7 @@ function New-FakeCHM {
     0x49,0x54,0x53,0x46,0x03,0x00,0x00,0x00,0x60,0x00,0x00,0x00,
     0x01,0x00,0x00,0x00,0xAA,0xBB,0xCC,0xDD
   )
-  return (Convert-BytesToBase64 -Bytes $chm)
+  return (Convert-BytesToBase64 -Bytes $chm -MinimumBytes $TargetPayloadBytes)
 }
 
 function New-FakeLNK {
@@ -145,7 +210,7 @@ function New-FakeLNK {
     0xC0,0x00,0x00,0x00,
     0x00,0x00,0x00,0x46
   )
-  return (Convert-BytesToBase64 -Bytes $lnk)
+  return (Convert-BytesToBase64 -Bytes $lnk -MinimumBytes $TargetPayloadBytes)
 }
 
 function New-FakePDFWithJavaScript {
@@ -183,7 +248,7 @@ startxref
 354
 %%EOF
 "@
-  return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($pdf))
+  return (Convert-TextToBase64MinSize -Text $pdf -MinimumBytes $TargetPayloadBytes)
 }
 
 function New-FakePDFWithLaunch {
@@ -229,7 +294,7 @@ startxref
 525
 %%EOF
 "@
-  return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($pdf))
+  return (Convert-TextToBase64MinSize -Text $pdf -MinimumBytes $TargetPayloadBytes)
 }
 
 function New-FakeSVG {
@@ -258,8 +323,8 @@ function New-FakeSVG {
 function New-FakeCertificate {
   return @"
 -----BEGIN CERTIFICATE-----
-MIIDXTCCAkWgAwIBAgIJAKlQz7jYpU9MMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
-BAYTAkRFMQ8wDQYDVQQIDAZCYXllcm4xDzANBgNVBAcMBk11ZW5jaDERMA8GA1UE
+MIIDXTCCAkWgAwIBAgIJAKlQz7jYpU9MMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNVB
+AYTAkRFMQ8wDQYDVQQIDAZCYXllcm4xDzANBgNVBAcMBk11ZW5jaDERMA8GA1UE
 CgwIVGVzdCBDQTAeFw0yNDAxMDEwMDAwMDBaFw0yNTAxMDEwMDAwMDBaMEUxCzAJ
 BgNVBAYTAkRFMQ8wDQYDVQQIDAZCYXllcm4xDzANBgNVBAcMBk11ZW5jaDERMA8G
 A1UECgwIVGVzdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMtC
@@ -295,17 +360,40 @@ $LNK_BASE64 = New-FakeLNK
 $CERT_PEM = New-FakeCertificate
 $CERT_PKCS7 = New-FakePKCS7
 $SVG_CONTENT = New-FakeSVG -EmbeddedBase64 $PE_BASE64
-$SVG_BASE64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($SVG_CONTENT))
-$HTA_BASE64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('<HTA:APPLICATION><script>alert("xs")</script>'))
-$JS_ATTACHMENT_BASE64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("var payload = 'test'; function run() { return payload; }"))
+$SVG_BASE64 = Convert-TextToBase64MinSize -Text $SVG_CONTENT -MinimumBytes $TargetPayloadBytes
+$HTA_BASE64 = Convert-TextToBase64MinSize -Text '<HTA:APPLICATION><script>alert("xs")</script>' -MinimumBytes $TargetPayloadBytes
+$JS_ATTACHMENT_BASE64 = Convert-TextToBase64MinSize -Text "var payload = 'test'; function run() { return payload; }" -MinimumBytes $TargetPayloadBytes
+
+$certPemB64 = Convert-TextToBase64MinSize -Text $CERT_PEM -MinimumBytes $TargetPayloadBytes
+$certPkcs7B64 = Convert-TextToBase64MinSize -Text $CERT_PKCS7 -MinimumBytes $TargetPayloadBytes
+
+# Sicherstellen, dass alle relevanten Payloads die Decode Gates erfüllen
+Assert-MinBase64Length -Name 'PE_BASE64' -Base64 $PE_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'WASM_BASE64' -Base64 $WASM_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'PDF_JS_BASE64' -Base64 $PDF_JS_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'PDF_LAUNCH_BASE64' -Base64 $PDF_LAUNCH_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_BASE64' -Base64 $ZIP_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'CHM_BASE64' -Base64 $CHM_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'LNK_BASE64' -Base64 $LNK_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'SVG_BASE64' -Base64 $SVG_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'HTA_BASE64' -Base64 $HTA_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'JS_ATTACHMENT_BASE64' -Base64 $JS_ATTACHMENT_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'certPemB64' -Base64 $certPemB64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'certPkcs7B64' -Base64 $certPkcs7B64 -MinimumChars $MinDecodeBase64Chars
 
 Write-Host "PE Payload: $($PE_BASE64.Length) Zeichen" -ForegroundColor Gray
 Write-Host "WASM Payload: $($WASM_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "PDF JS Payload: $($PDF_JS_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "PDF Launch Payload: $($PDF_LAUNCH_BASE64.Length) Zeichen" -ForegroundColor Gray
 Write-Host "ZIP Payload: $($ZIP_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "CHM Payload: $($CHM_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "LNK Payload: $($LNK_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "SVG Payload: $($SVG_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "HTA Payload: $($HTA_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "JS Attachment Payload: $($JS_ATTACHMENT_BASE64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "CERT PEM Payload: $($certPemB64.Length) Zeichen" -ForegroundColor Gray
+Write-Host "CERT PKCS7 Payload: $($certPkcs7B64.Length) Zeichen" -ForegroundColor Gray
 Write-Host ""
-
-$certPemB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CERT_PEM))
-$certPkcs7B64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($CERT_PKCS7))
 
 $testFiles = @()
 
@@ -816,7 +904,7 @@ $testFiles += @{
   Name = "test24_image_polyglot_hint.html"
   ExpectedScore = "0-2"
   ExpectedDetection = "INFO_ONLY"
-  Description = "Image mit verdaechtigem Namen"
+  Description = "Image mit verdächtigem Namen"
   Content = @"
 <!DOCTYPE html>
 <html><body>
@@ -1036,7 +1124,7 @@ try {
       $path = Join-Path -Path (Get-Location).Path -ChildPath $file.Name
 
       if ((Test-Path -LiteralPath $path) -and (-not $Force)) {
-        Write-Host "⏭  Ueberspringe existierende Datei: $($file.Name) (nutze -Force)" -ForegroundColor Yellow
+        Write-Host "⏭  Überspringe existierende Datei: $($file.Name) (nutze -Force)" -ForegroundColor Yellow
         continue
       }
 
@@ -1077,6 +1165,9 @@ try {
   if ($errorCount -gt 0) {
     Write-Host "║  Fehler: $errorCount" -ForegroundColor Red
   }
+  Write-Host "║" -ForegroundColor Cyan
+  Write-Host "║  Decode Gate Ziel: Base64 >= $MinDecodeBase64Chars Zeichen" -ForegroundColor Yellow
+  Write-Host "║  Payload Byte Ziel: >= $TargetPayloadBytes Bytes" -ForegroundColor Yellow
   Write-Host "║" -ForegroundColor Cyan
   Write-Host "║  ERWARTETE DETECTION RATE: 90% (27/30 Tests)" -ForegroundColor Yellow
   Write-Host "║" -ForegroundColor Cyan
