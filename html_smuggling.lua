@@ -1,30 +1,58 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.3.7a
+-- HTML Smuggling Detection v4.4.0
 --
--- Erweiterungen gegenueber v4.3.6d:
---   15. attachment_vectors Modul fuer Non HTML und Attachment Vektoren
---   16. certificate_smuggling Modul fuer PEM, PKCS und Zertifikatscontainer im Kontext
---   17. image_smuggling_info Modul als optionales Info Only Modul fuer Bild Missbrauchsindikatoren
---   18. Attachment Pfad fuer PDF, SVG, CHM, HTA, OneNote, Office Macro Container, Script Dateien
---   19. PDF Active Content Erkennung fuer /JavaScript, /OpenAction, /Launch, /EmbeddedFile, /RichMedia
---   20. SVG Active Content Erkennung fuer <script>, onload, foreignObject, xlink:href, data URIs
---   21. Zertifikats Container und Inline PEM Erkennung mit FP armer Kontextlogik
+-- Refactor und Erweiterungen seit v4.3.5:
 --
--- Fixes gegenueber v4.3.7:
---   22. soft_only_cap wird korrekt aus CFG.soft_only_cap gelesen
---   23. is_safe_script_domain() ergänzt fuer external_scripts Pfad
---   24. cert_inline_pkcs wird in HTML und Script Kontext korrekt gesetzt
---   25. Version und Description auf 4.3.7a angehoben
---
+-- 1. collect_script_entries() – einmaliges HTML-Parsing fuer Script-Bloecke
+-- 2. score_script_interest() / select_top_script_entries() – interessanteste Scripts zuerst
+-- 3. scan_script_blocks(ctx, html_view, script_entries) – kein doppeltes gmatch
+-- 4. analyze_script_block(ctx, html_view, entry) – Script-Objekt statt roher String
+-- 5. scan_external_scripts_module(ctx, script_entries) – kein zweites HTML-Parse
+-- 6. scan_css_code_exec_module(ctx, html_view, script_view, meta) – keine :lower() mehr
+-- 7. extract_css_content_values(html_view) – nutzt html_view.scan
+-- 8. BASE_WEIGHT_MAP einmalig nach CFG-Merge gebaut, nicht pro Aufruf neu
+-- 9. css_exfil scannt grosse <style>-Bloecke auf raw_lc statt scan_lc
+-- 10. has_obfuscated_api_call() String-Konkatenation auf verdaechtige API-Namen verengt
+-- 11. collect_script_entries() URL-Extraktion: protocol-relative // ergaenzt
+-- 12. collect_script_entries() lc_body lazy: lowercase nur bei Body >= script_min_len
+-- 13. statisches src=-Attribut: unquoted HTML abgedeckt
+-- 14. dynamische src-Extraktion: setAttribute("src", ...) und el["src"]=... ergaenzt
+-- 15. attachment_vectors Modul fuer Non HTML und Attachment Vektoren
+-- 16. certificate_smuggling Modul fuer PEM, PKCS und Zertifikatscontainer im Kontext
+-- 17. image_smuggling_info Modul als optionales Info Only Modul fuer Bild Missbrauchsindikatoren
+-- 18. Attachment Pfad fuer PDF, SVG, CHM, HTA, OneNote, Office Macro Container und Script-Dateien
+-- 19. PDF Active Content Erkennung fuer /JavaScript, /OpenAction, /Launch, /EmbeddedFile und /RichMedia
+-- 20. SVG Active Content Erkennung fuer <script>, onload, foreignObject, xlink:href und data URIs
+-- 21. Zertifikatscontainer und Inline PEM Erkennung mit FP-armer Kontextlogik
+-- 22. invalid config -> Symbol wird nicht registriert
+-- 23. Deep-Scan-Gate nutzt echte inline script_entries statt nur HTML-Tag-Indikatoren
+-- 24. detect_split_payload() zusaetzlich mit Mindest-Gesamtlaenge und echtem Exec-Kontext
+-- 25. dynamische Script-Extraktion an echte createElement('script')-Variablen gebunden
+-- 26. dynamische Script-Entries nur bei echter DOM-Einbindung
+-- 27. sniff_decoded() in kleinere Helper zerlegt, analyze_decoded_blob() behandelt Sniff-Fehler defensiv
+-- 28. soft_only_cap wird korrekt aus CFG.soft_only_cap gelesen
+-- 29. is_safe_script_domain() fuer external_scripts Pfad ergaenzt
+-- 30. cert_inline_pkcs wird in HTML- und Script-Kontext korrekt gesetzt
+-- 31. Array-Join-Resolver in advanced_deobfuscate bleibt aktiv fuer var x=["f1","f2",...]; x.join('')
+-- 32. kleine Labor- und Stager-Payloads werden wieder decodiert, min_decode_total Standard auf 400 gesenkt
+-- 33. detect_split_payload erkennt Array-Join-Konstrukte robust
+-- 34. scan_decoded_payload_module nutzt ein explizites min_decode_total Fallback von 400
+-- 35. Join-Pattern zaehlt fuer Marker und Summary konsistent auch bei wenigen Fragmenten
+-- 36. safe_decode_base64 loggt Decode-Fehler nicht mehr als warnx, sondern nur noch im Debug-Pfad
+-- 37. scan_decoded_payload_module bindet min_decode_total einmalig lokal und nutzt den Wert konsistent fuer Debug und Stop-Gate
+-- 38. Decode-Logging und kleine Runtime-Cleanups wurden vereinheitlicht, ohne die bestehende Detection-Logik zu aendern
+-- 39. Version und Description auf v4.4.0 aktualisiert
+
 -- Design:
---   Die Struktur bleibt nah an v4.3.6d.
---   HTML bleibt der Hauptpfad.
---   Neue Attachment und Zertifikats Scanner ergaenzen den bestehenden Flow.
---   Image Smuggling bleibt standardmaessig info_only.
+-- Die Struktur bleibt nah an v4.3.6d.
+-- HTML bleibt der Hauptpfad.
+-- Neue Attachment- und Zertifikats-Scanner ergaenzen den bestehenden Flow.
+-- Image Smuggling bleibt standardmaessig info_only.
+-- v4.4.0 fokussiert auf saubere Runtime-Steuerung, konsistentere Decode-Gates und weniger Log-Flooding.
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.3.7a"
+local VERSION = "4.4.0"
 
 -- =========================
 -- Config lesen
@@ -58,6 +86,7 @@ local SAFE_TASK_ACCESS          = (CFG.safe_task_access ~= false)
 local SAFE_PART_ACCESS          = (CFG.safe_part_access ~= false)
 local LOG_CONFIG_VALIDATION     = (CFG.log_config_validation ~= false)
 local STRICT_WEIGHT_VALIDATION  = (CFG.strict_weight_validation == true)
+local DECODE_DEBUG              = (CFG.decode_debug == true)
 local RUNTIME_MAX_FINAL_SCORE = MAX_FINAL_SCORE
 local RUNTIME_SOFT_ONLY_CAP   = SOFT_ONLY_SCORE_CAP
 local RUNTIME_MIN_SCORE       = MIN_SCORE
@@ -435,18 +464,19 @@ local DEFAULT_REASON_POLICY = {
   web3_eth_call              = { class = "SUSPICIOUS_API" },
   att_pdf_javascript         = { class = "SUSPICIOUS_API" },
   att_pdf_openaction         = { class = "SUSPICIOUS_API" },
-  att_pdf_launch             = { class = "SUSPICIOUS_API" },
-  att_pdf_embeddedfile       = { class = "SUSPICIOUS_API" },
+  att_pdf_launch             = { class = "SCRIPT_HARD" },
+  att_pdf_embeddedfile       = { class = "CONTAINER" },
   att_pdf_richmedia          = { class = "SUSPICIOUS_API" },
-  att_svg_script             = { class = "SUSPICIOUS_API" },
+
+  att_svg_script             = { class = "SCRIPT_HARD" },
   att_svg_event_handler      = { class = "SUSPICIOUS_API" },
   att_svg_foreignobject      = { class = "SUSPICIOUS_API" },
   att_svg_xlink_href         = { class = "SUSPICIOUS_API" },
-  att_svg_data_uri           = { class = "SUSPICIOUS_API" },
+  att_svg_data_uri           = { class = "JS_SMUGGLING" },
 
   antisandbox_webdriver      = { class = "EVASION" },
   hardware_check_evasion     = { class = "EVASION" },
-  human_interaction_required = { class = "BONUS_SOFT", bonus_module = "evasion" },
+  human_interaction_required = { class = "EVASION" },
 
   atob                    = { class = "JS_SMUGGLING" },
   blob                    = { class = "JS_SMUGGLING" },
@@ -519,6 +549,7 @@ local DEFAULT_REASON_POLICY = {
   script_total_budget           = { class = "INFO" },
   deobfus_timeout               = { class = "INFO" },
   decode_gate_not_strong_enough = { class = "INFO" },
+  decode_depth_limit            = { class = "INFO" },
   soft_only_cap                 = { class = "INFO" },
   max_final_score               = { class = "INFO" },
   min_score                     = { class = "INFO" },
@@ -744,22 +775,38 @@ local function clamp_runtime_values()
   if RUNTIME_CRITICAL_BOOST < 0 then RUNTIME_CRITICAL_BOOST = 0 end
 end
 
+local function nonempty_cfg_string(v)
+  return type(v) == "string" and v:match("%S") ~= nil
+end
+
 -- =========================
 -- Maps
 -- =========================
 local SAFE_SCRIPT_DOMAINS_MAP = nil
-if type(CFG.safe_script_domains_map) == "string" then
-  SAFE_SCRIPT_DOMAINS_MAP = rspamd_config:add_map{ url = CFG.safe_script_domains_map, type = "set", description = "html_smuggling safe script domains" }
+if nonempty_cfg_string(CFG.safe_script_domains_map) then
+  SAFE_SCRIPT_DOMAINS_MAP = rspamd_config:add_map{
+    url = tostring(CFG.safe_script_domains_map):match("^%s*(.-)%s*$"),
+    type = "set",
+    description = "html_smuggling safe script domains"
+  }
 end
 
 local TRUSTED_NEWSLETTER_DOMAINS_MAP = nil
-if type(CFG.trusted_newsletter_domains_map) == "string" then
-  TRUSTED_NEWSLETTER_DOMAINS_MAP = rspamd_config:add_map{ url = CFG.trusted_newsletter_domains_map, type = "set", description = "html_smuggling trusted newsletter domains" }
+if nonempty_cfg_string(CFG.trusted_newsletter_domains_map) then
+  TRUSTED_NEWSLETTER_DOMAINS_MAP = rspamd_config:add_map{
+    url = tostring(CFG.trusted_newsletter_domains_map):match("^%s*(.-)%s*$"),
+    type = "set",
+    description = "html_smuggling trusted newsletter domains"
+  }
 end
 
 local UNSAFE_SCRIPT_DOMAINS_MAP = nil
-if type(CFG.unsafe_script_domains_map) == "string" then
-  UNSAFE_SCRIPT_DOMAINS_MAP = rspamd_config:add_map{ url = CFG.unsafe_script_domains_map, type = "set", description = "html_smuggling unsafe script domains" }
+if nonempty_cfg_string(CFG.unsafe_script_domains_map) then
+  UNSAFE_SCRIPT_DOMAINS_MAP = rspamd_config:add_map{
+    url = tostring(CFG.unsafe_script_domains_map):match("^%s*(.-)%s*$"),
+    type = "set",
+    description = "html_smuggling unsafe script domains"
+  }
 end
 
 -- =========================
@@ -775,6 +822,18 @@ local function safe_string_call(default, fn, ...)
   local ok, res = pcall(fn, ...)
   if not ok or res == nil then return default or "" end
   return tostring(res)
+end
+
+local function decode_dbg(task, fmt, ...)
+  if not (DEBUG or SCORE_DEBUG or DECODE_DEBUG) then return end
+  local ok, msg = pcall(string.format, fmt, ...)
+  if ok and msg then
+    rspamd_logger.infox(task, msg)
+  end
+end
+
+local function elapsed_ms(t0)
+  return (rspamd_util.get_time() - t0) * 1000.0
 end
 
 local function normalize_text(s)
@@ -831,12 +890,23 @@ local function is_base64ish(s)
 end
 
 local function safe_decode_base64(task, b64, limit)
-  local ok, res = pcall(function() return rspamd_util.decode_base64(b64, limit) end)
-  if not ok then
-    if task then rspamd_logger.warnx(task, "Base64 decode failed") end
+  local ok, res = pcall(function()
+    return rspamd_util.decode_base64(b64, limit)
+  end)
+
+  if not ok or res == nil then
+    if task and (DEBUG or DECODE_DEBUG) then
+      rspamd_logger.debugx(task, "Base64 decode failed")
+    end
     return nil
   end
-  return res
+
+  local out = normalize_text(res)
+  if out == nil or out == "" then
+    return nil
+  end
+
+  return out
 end
 
 local function smart_text_scan(s, chunk)
@@ -1080,7 +1150,9 @@ function Detector.new(task)
   local self = setmetatable({}, Detector)
   self.task = task
   self.final_score = 0.0
+  self.payload_kind = nil
   self.critical_kind = nil
+  self.observed_kind = nil
   self.external_scripts = {}
   self.reasons = {}
   self.info_reasons = {}
@@ -1105,8 +1177,10 @@ function Detector.new(task)
   self.newsletter_reason = "none"
   self.heur_mul = 1.0
   self.deep_scan = true
+  self.decode_depth = 0
+  self.max_decode_depth = 2
   self.total_script_scanned = 0
-  self.started_at = rspamd_util.get_ticks()
+  self.started_at = rspamd_util.get_time()
   self.phase = {
     html_parts_seen = 0, html_parts_scanned = 0,
     attach_parts_seen = 0, attach_parts_scanned = 0,
@@ -1126,8 +1200,27 @@ end
 function Detector:has_reason(why) return self.reasons[why] == true end
 function Detector:has_info(why) return self.info_reasons[why] == true end
 
+function Detector:set_payload_kind(kind)
+  if kind and kind ~= "" and not self.payload_kind then
+    self.payload_kind = kind
+  end
+end
+
+function Detector:set_observed_kind(kind)
+  if kind and kind ~= "" and not self.observed_kind then
+    self.observed_kind = kind
+  end
+end
+
 function Detector:set_critical(kind)
-  if kind and kind ~= "" and not self.critical_kind then self.critical_kind = kind end
+  if kind and kind ~= "" then
+    if not self.payload_kind then
+      self.payload_kind = kind
+    end
+    if not self.critical_kind then
+      self.critical_kind = kind
+    end
+  end
 end
 
 function Detector:add_info(why)
@@ -1205,8 +1298,8 @@ function Policy.has_basic_js_gate(raw_lc)
   if raw_lc:find("new%s+webassembly%.instance", 1, false) then return true end
   if raw_lc:find("getcomputedstyle", 1, true) then return true end
   if raw_lc:find("notification%.requestpermission", 1, false) then return true end
-  if raw_lc:find("ms%-appinstaller", 1, true) then return true end
-  if raw_lc:find("%.appinstaller", 1, true) then return true end
+  if raw_lc:find("ms-appinstaller", 1, true) then return true end
+  if raw_lc:find(".appinstaller", 1, true) then return true end
   return false
 end
 
@@ -1277,20 +1370,22 @@ local function extract_b64_candidates(text, max_candidates_override)
   if #text > max_in then text = text:sub(1, max_in) end
   local max_cand = tonumber(max_candidates_override) or (LB64.max_candidates or 6)
   local min_len  = tonumber(LB64.min_len) or 200
-  local start_time = rspamd_util.get_ticks()
+  local start_time = rspamd_util.get_time()
   local budget_ms  = tonumber(THRESHOLDS.b64_extract_loop_budget_ms) or 25.0
   local iter_count = 0
   for raw in text:gmatch("[A-Za-z0-9%+/_=-]+") do
     iter_count = iter_count + 1
-    if (iter_count % 80 == 0) and (((rspamd_util.get_ticks() - start_time) / 1000.0) > budget_ms) then break end
+    if (iter_count % 80 == 0) and (elapsed_ms(start_time) > budget_ms) then break end
     if #candidates >= max_cand then break end
     if #raw >= min_len and not looks_like_tracking_or_inline_b64(raw) then
       local nb = normalize_b64(raw)
       if #nb >= min_len and nb:match("^[A-Za-z0-9%+/_=-]+$") then
         local q = base64_quality_score(nb)
         if q >= 3 then
-          local h = rspamd_util.str_hash(nb)
-          if not seen[h] then seen[h] = true; candidates[#candidates + 1] = nb end
+		  if not seen[nb] then
+			seen[nb] = true
+			candidates[#candidates + 1] = nb
+		  end
         end
       end
     end
@@ -1300,24 +1395,43 @@ end
 
 -- =========================
 -- Deobfuskation
+-- FIX v4.3.7b: Array-Join-Resolver eingebaut
 -- =========================
 local function advanced_deobfuscate(script, timeout_ms)
   if not script or #script < 30 then return script, {}, 0 end
   local max_len = tonumber(LSCRIPT.max_script_len) or 80000
   if #script > max_len then script = script:sub(1, max_len) end
-  local t0 = rspamd_util.get_ticks()
+  local t0 = rspamd_util.get_time()
   local budget = tonumber(timeout_ms) or tonumber(LSCRIPT.deobfus_timeout_ms) or 50.0
   local timeout_flag = 0
   local function timed_out(op_cnt)
     if (op_cnt % 10) ~= 0 then return false end
-    return (rspamd_util.get_ticks() - t0) / 1000.0 > budget
+    return elapsed_ms(t0) > budget
   end
   local clean, var_map, var_cnt, virtuals = script, {}, 0, {}
+
+  -- FIX v4.3.7b: Separater Zaehler fuer Join-Kandidaten damit
+  -- virtual_max_payloads diese nicht verdraengt
+  local join_virtuals_added = 0
+  local MAX_JOIN_VIRTUALS = 3
+
   local function maybe_add_virtual(val)
     if not val then return end
     if #virtuals >= (LOBFUS.virtual_max_payloads or 3) then return end
     if #val >= (LOBFUS.virtual_trigger_len or 120) then virtuals[#virtuals + 1] = val end
   end
+
+  -- FIX v4.3.7b: Join-Kandidat mit eigenem Limit und ohne virtual_trigger_len Check
+  local function add_join_virtual(val)
+    if not val or #val < (LB64.min_len or 200) then return end
+    if join_virtuals_added >= MAX_JOIN_VIRTUALS then return end
+	for _, v in ipairs(virtuals) do
+	  if v == val then return end
+	end
+    virtuals[#virtuals + 1] = val
+    join_virtuals_added = join_virtuals_added + 1
+  end
+
   local function remember_var(name, val)
     if not name or not val then return end
     if #name > 64 or var_map[name] or var_cnt >= (LSCRIPT.max_vars or 20) then return end
@@ -1326,6 +1440,8 @@ local function advanced_deobfuscate(script, timeout_ms)
     var_map[name] = val
     var_cnt = var_cnt + 1
   end
+
+  -- Decl-Loop: var/let/const x = '...'
   local decl_ops = 0
   for _, kw in ipairs({"const", "let", "var"}) do
     for name, val in script:gmatch(kw .. "%s+([%w_]+)%s*=%s*'([^']*)'") do
@@ -1339,6 +1455,8 @@ local function advanced_deobfuscate(script, timeout_ms)
       remember_var(name, val)
     end
   end
+
+  -- += Accumulation-Loop (unveraendert aus 4.3.7a)
   local add_ops = 0
   for name, val in script:gmatch("([%w_]+)%s*%+=%s*'([^']*)'") do
     add_ops = add_ops + 1
@@ -1356,6 +1474,90 @@ local function advanced_deobfuscate(script, timeout_ms)
       maybe_add_virtual(var_map[name])
     end
   end
+
+  -- ================================================================
+  -- FIX v4.3.7b: Array-Join-Resolver
+  -- Erkennt: var/let/const name = ["frag1","frag2",...]; name.join(...)
+  -- Laeuft auf vollem script (nicht smart_text_scan Chunk) damit
+  -- Array-Literale in der Mitte grosser Scripts nicht weggeschnitten werden.
+  -- MAX_JOIN_ARRAY_PARTS=20 statt join_max_parts=5 fuer Array-Literale.
+  -- Join-Kandidaten umgehen base64_quality_score via add_join_virtual
+  -- (is_frag_base64ish reicht, Padding-Bloecke haben Entropy ~0 aber
+  -- sind valide PE-Header-Bestandteile).
+  -- ================================================================
+  local MAX_JOIN_ARRAY_PARTS = 20
+  local MAX_JOIN_TOTAL_LEN   = tonumber(LB64.join_max_len) or 180000
+
+  local join_ops = 0
+  for kw_decl, arr_name, arr_body in script:gmatch(
+      "([%w]+)%s+([%w_]+)%s*=%s*%[([^%]]+)%]") do
+    join_ops = join_ops + 1
+    if timed_out(join_ops) then break end
+    if join_virtuals_added >= MAX_JOIN_VIRTUALS then break end
+
+    -- Nur weiterarbeiten wenn arr_name.join( im Script vorkommt
+    if not script:find(arr_name .. "%s*%.%s*join%s*%(", 1, false) then
+      goto continue_join
+    end
+
+    do
+      local frags = {}
+      local total_len = 0
+      local ok_frags = true
+
+      -- Doppelte Anfuehrungszeichen
+      for frag in arr_body:gmatch('"([^"]*)"') do
+        local f = frag:gsub("%s+", "")
+        if #f > 0 then
+          if not f:match("^[A-Za-z0-9%+/_=-]*$") then ok_frags = false; break end
+          frags[#frags + 1] = f
+          total_len = total_len + #f
+          if #frags > MAX_JOIN_ARRAY_PARTS or total_len > MAX_JOIN_TOTAL_LEN then
+            ok_frags = false; break
+          end
+        end
+      end
+
+      -- Falls keine doppelten gefunden: einfache Anfuehrungszeichen versuchen
+      if ok_frags and #frags == 0 then
+        for frag in arr_body:gmatch("'([^']*)'") do
+          local f = frag:gsub("%s+", "")
+          if #f > 0 then
+            if not f:match("^[A-Za-z0-9%+/_=-]*$") then ok_frags = false; break end
+            frags[#frags + 1] = f
+            total_len = total_len + #f
+            if #frags > MAX_JOIN_ARRAY_PARTS or total_len > MAX_JOIN_TOTAL_LEN then
+              ok_frags = false; break
+            end
+          end
+        end
+      end
+
+      if ok_frags and #frags >= 2 then
+        local joined = table.concat(frags, "")
+        -- URL-safe Base64 normalisieren
+        joined = joined:gsub("%-", "+"):gsub("_", "/")
+        local mod4 = #joined % 4
+        if mod4 == 2 then joined = joined .. "=="
+        elseif mod4 == 3 then joined = joined .. "=" end
+
+        if #joined >= (LB64.min_len or 200) and joined:match("^[A-Za-z0-9%+/_=-]+$") then
+          add_join_virtual(joined)
+          -- Auch in var_map eintragen fuer nachfolgende Resolve-Passes
+          if var_cnt < (LSCRIPT.max_vars or 20) and not var_map[arr_name] then
+            var_map[arr_name] = joined
+            var_cnt = var_cnt + 1
+          end
+        end
+      end
+    end
+
+    ::continue_join::
+  end
+  -- ================================================================
+  -- Ende Array-Join-Resolver
+  -- ================================================================
+
   local function resolve_token(tok)
     tok = trim(tok or "")
     if tok == "" then return nil end
@@ -1366,6 +1568,7 @@ local function advanced_deobfuscate(script, timeout_ms)
     if tok:match("^[%w_]+$") then return var_map[tok] end
     return nil
   end
+
   local function try_resolve_concat(expr)
     local out, parts = {}, 0
     for tok in expr:gmatch("([^%+]+)") do
@@ -1380,6 +1583,7 @@ local function advanced_deobfuscate(script, timeout_ms)
     if is_frag_base64ish(s) then return s end
     return nil
   end
+
   local function try_resolve_join(expr)
     local inside = expr:match("^%[(.-)%]%.join%s*%(%s*['\"][^'\"]*['\"]%s*%)$")
     if not inside then return nil end
@@ -1396,6 +1600,7 @@ local function advanced_deobfuscate(script, timeout_ms)
     if is_frag_base64ish(s) then return s end
     return nil
   end
+
   local resolve_region = script:sub(1, math.min(#script, 20000))
   local passes = tonumber(LOBFUS.resolve_passes) or 8
   if #script > 100000 then passes = math.min(passes, 2)
@@ -1424,6 +1629,7 @@ local function advanced_deobfuscate(script, timeout_ms)
     end
     if not changed then break end
   end
+
   clean = clean:gsub('"%s*%+%s*"', ""):gsub("'%s*%+%s*'", "")
   return clean, virtuals, timeout_flag
 end
@@ -1470,10 +1676,15 @@ local function sniff_decoded(bin)
     if bin:sub(1, 6) == "Rar!\x1A\x07" then return "RAR" end
     if bin:sub(1, 4) == "PK\003\004" or bin:sub(1, 4) == "PK\005\006" then
       local head = bin:sub(1, 200000)
-      if head:find("AppxManifest%.xml", 1, true) or head:find("AppxBlockMap%.xml", 1, true) or head:find("AppxSignature%.p7x", 1, true) or head:find("AppxMetadata/", 1, true) then
-        if head:find("AppxManifest%.xml", 1, true) then return "APPX" end
-        return "MSIX"
-      end
+	  if head:find("AppxManifest.xml", 1, true) or
+	     head:find("AppxBlockMap.xml", 1, true) or
+	     head:find("AppxSignature.p7x", 1, true) or
+	     head:find("AppxMetadata/", 1, true) then
+	    if head:find("AppxManifest.xml", 1, true) then
+		  return "APPX"
+	    end
+	    return "MSIX"
+	  end
       return "ZIP"
     end
     if bin:sub(1, 5) == "%PDF-" then return "PDF" end
@@ -1489,23 +1700,25 @@ local function sniff_decoded(bin)
     if bin:sub(1, 4) == "\000asm" or bin:sub(1, 8) == "\000asm\001\000\000\000" then return "WASM" end
     local head = bin:sub(1, 4096)
     local l = head:lower()
-    if l:find("<?xml", 1, true) or l:find("<appinstaller", 1, true) then return "XML" end
-    if l:find("<html", 1, true) or l:find("<script", 1, true) then return "HTML" end
+    if l:find("<appinstaller", 1, true) then return "XML_APPINSTALLER" end
+    if l:find("<?xml", 1, true) then return "XML" end
     if l:find("<svg", 1, true) then return "SVG" end
+    if l:find("<html", 1, true) or l:find("<script", 1, true) then return "HTML" end
     if l:find("<hta:", 1, true) or l:find("application%s*=") or l:find("showintaskbar", 1, true) then return "HTA" end
-    local vbs_ind = 0
-    if l:find("wscript%.createobject", 1, true) then vbs_ind = vbs_ind + 1 end
-    if l:find("on error resume next", 1, true) then vbs_ind = vbs_ind + 1 end
-    if l:find("createobject%s*%(", 1, false) then vbs_ind = vbs_ind + 1 end
-    if vbs_ind >= 2 then return "VBS" end
-    local ps_ind = 0
-    if l:find("powershell", 1, true) then ps_ind = ps_ind + 1 end
-    if l:find("invoke%-expression", 1, true) then ps_ind = ps_ind + 1 end
-    if l:find("%biex%b", 1, false) or l:find("%-enc%s+", 1, false) then ps_ind = ps_ind + 1 end
-    if ps_ind >= 2 then return "PS1" end
+	local vbs_ind = 0
+	if l:find("wscript.createobject", 1, true) then vbs_ind = vbs_ind + 1 end
+	if l:find("on error resume next", 1, true) then vbs_ind = vbs_ind + 1 end
+	if l:find("createobject%s*%(", 1, false) then vbs_ind = vbs_ind + 1 end
+	if vbs_ind >= 2 then return "VBS" end
+
+	local ps_ind = 0
+	if l:find("powershell", 1, true) then ps_ind = ps_ind + 1 end
+	if l:find("invoke-expression", 1, true) then ps_ind = ps_ind + 1 end
+	if l:find("%biex%b", 1, false) or l:find("%-enc%s+", 1, false) then ps_ind = ps_ind + 1 end
+	if ps_ind >= 2 then return "PS1" end
     local bat_ind = 0
     if l:find("@echo off", 1, true) then bat_ind = bat_ind + 1 end
-    if l:find("cmd%.exe", 1, true) or l:find("start%s+/", 1, false) then bat_ind = bat_ind + 1 end
+    if l:find("cmd.exe", 1, true) or l:find("start%s+/", 1, false) then bat_ind = bat_ind + 1 end
     if l:find("%%[a-z]%%", 1, false) then bat_ind = bat_ind + 1 end
     if bat_ind >= 2 then return "BAT" end
     local js_ind = 0
@@ -1514,7 +1727,7 @@ local function sniff_decoded(bin)
     if l:find("=>", 1, true) then js_ind = js_ind + 1 end
     if l:find("eval%s*%(", 1, false) then js_ind = js_ind + 1 end
     if l:find("atob%s*%(", 1, false) then js_ind = js_ind + 1 end
-    if l:find("document%.createelement", 1, true) then js_ind = js_ind + 1 end
+    if l:find("document.createelement", 1, true) then js_ind = js_ind + 1 end
     if l:find("addeventlistener", 1, true) then js_ind = js_ind + 1 end
     if js_ind >= 2 then return "JS" end
     return "BINARY"
@@ -1573,11 +1786,16 @@ end
 local function scan_appinstaller_module(ctx, raw_html)
   if not module_enabled("appinstaller") then return end
   local raw_lc = raw_html:lower()
-  if raw_lc:find("ms%-appinstaller", 1, true) then
-    if raw_lc:find("ms%-appinstaller:%s*", 1, false) then ctx:add_module_reason("appinstaller", "ms_appinstaller_uri")
-    else ctx:add_module_reason("appinstaller", "ms_appinstaller_word") end
+  if raw_lc:find("ms-appinstaller", 1, true) then
+    if raw_lc:find("ms%-appinstaller:%s*", 1, false) then
+      ctx:add_module_reason("appinstaller", "ms_appinstaller_uri")
+    else
+      ctx:add_module_reason("appinstaller", "ms_appinstaller_word")
+    end
   end
-  if raw_lc:find("%.appinstaller", 1, true) then ctx:add_module_reason("appinstaller", "appinstaller_file") end
+  if raw_lc:find(".appinstaller", 1, true) then
+    ctx:add_module_reason("appinstaller", "appinstaller_file")
+  end
 end
 
 local function has_obfuscated_api_call(lc)
@@ -1603,7 +1821,7 @@ local function has_obfuscated_api_call(lc)
   for _ in lc:gmatch("u%x%x%x%x") do unicode_count = unicode_count + 1; if unicode_count >= 3 then return true end end
   if lc:find("fromcharcode%s*%(", 1, false) or lc:find("charcodeat%s*%(", 1, false) then return true end
   if lc:find("eval%s*%([^%)]+%+[^%)]+%)", 1, false) then return true end
-  if lc:find("atob%.call", 1, true) or lc:find("atob%.apply", 1, true) then return true end
+  if lc:find("atob.call", 1, true) or lc:find("atob.apply", 1, true) then return true end
   if lc:find("%.constructor%s*%(", 1, false) then return true end
   return false
 end
@@ -1675,21 +1893,73 @@ end
 
 local function detect_split_payload(html)
   if not html or #html < 120 then return false end
-  local cnt, vars = 0, {}
+
+  local lc = html:lower()
+  local has_sink =
+    lc:find("atob%s*%(", 1, false) or
+    lc:find("blob%s*%(", 1, false) or
+    lc:find("createobjecturl", 1, true) or
+    lc:find("fetch%s*%(", 1, false)
+
+  if not has_sink then
+    return false
+  end
+
   local min_parts = tonumber(LSCRIPT.split_payload_min_vars) or 6
+
+  local cnt, vars = 0, {}
   local function register_decl(varname, value)
     if not varname or not value then return end
     value = (value or ""):gsub("%s+", "")
     if not is_frag_base64ish(value) or #value < 8 or vars[varname] then return end
-    vars[varname] = true; cnt = cnt + 1
+    vars[varname] = true
+    cnt = cnt + 1
   end
+
   local function scan_keyword(keyword)
-    for varname, value in html:gmatch(keyword .. "%s+([%w_]+)%s*=%s*'([^']*)'") do register_decl(varname, value) end
-    for varname, value in html:gmatch(keyword .. '%s+([%w_]+)%s*=%s*"([^"]*)"') do register_decl(varname, value) end
+    for varname, value in html:gmatch(keyword .. "%s+([%w_]+)%s*=%s*'([^']*)'") do
+      register_decl(varname, value)
+    end
+    for varname, value in html:gmatch(keyword .. '%s+([%w_]+)%s*=%s*"([^"]*)"') do
+      register_decl(varname, value)
+    end
   end
-  scan_keyword("var"); scan_keyword("let"); scan_keyword("const")
-  local has_concat = html:find("%+=", 1, false) or html:find("%.join%s*%(", 1, false) or html:find("atob%s*%(", 1, false) or html:find("blob%s*%(", 1, false) or html:find("createobjecturl", 1, true)
-  return cnt >= min_parts and has_concat
+
+  scan_keyword("var")
+  scan_keyword("let")
+  scan_keyword("const")
+
+  if cnt >= min_parts and (html:find("%+=", 1, false) or html:find("%.join%s*%(", 1, false)) then
+    return true
+  end
+
+  -- FIX v4.3.7c-r3: Array-Join Konstrukte robust erkennen
+  -- var/let/const name = ["frag1","frag2",...]; name.join('')
+  local function check_array_join(pattern)
+    for arr_name, arr_body in html:gmatch(pattern) do
+      if html:find(arr_name .. "%s*%.%s*join%s*%(", 1, false) then
+        local frag_count = 0
+        for frag in arr_body:gmatch('"([^"]*)"') do
+          local f = (frag or ""):gsub("%s+", "")
+          if is_frag_base64ish(f) and #f >= 8 then frag_count = frag_count + 1 end
+        end
+        if frag_count == 0 then
+          for frag in arr_body:gmatch("'([^']*)'") do
+            local f = (frag or ""):gsub("%s+", "")
+            if is_frag_base64ish(f) and #f >= 8 then frag_count = frag_count + 1 end
+          end
+        end
+        if frag_count >= 2 then return true end
+      end
+    end
+    return false
+  end
+
+  if check_array_join("[Vv][Aa][Rr]%s+([%w_]+)%s*=%s*%[([^%]]+)%]") then return true end
+  if check_array_join("[Ll][Ee][Tt]%s+([%w_]+)%s*=%s*%[([^%]]+)%]") then return true end
+  if check_array_join("[Cc][Oo][Nn][Ss][Tt]%s+([%w_]+)%s*=%s*%[([^%]]+)%]") then return true end
+
+  return false
 end
 
 local function collect_timer_positions(lc)
@@ -1734,32 +2004,65 @@ end
 
 local function scan_js_smuggling_html_module(ctx, html_view)
   if not module_enabled("js_smuggling") then return end
-  local lc, mod, obf_mod = html_view.scan_lc, "js_smuggling", "obfuscation"
+
+  local lc = html_view.scan_lc
+  local mod = "js_smuggling"
+  local obf_mod = "obfuscation"
+
   if lc:find("atob%s*%(", 1, false) then ctx:add_module_reason(mod, "atob") end
   if lc:find("blob%s*%(", 1, false) then ctx:add_module_reason(mod, "blob") end
   if lc:find("createobjecturl", 1, true) then ctx:add_module_reason(mod, "createObjectURL") end
   if lc:find("fetch%s*%(", 1, false) then ctx:add_module_reason(mod, "fetch") end
   if lc:find("filereader", 1, true) then ctx:add_module_reason(mod, "filereader") end
   if lc:find("uint8array", 1, true) then ctx:add_module_reason(mod, "uint8array") end
-  if has_long_base64_sequence(lc, LSCAN.long_html_b64_threshold or 1200) then ctx:add_module_reason(mod, "b64_long_html") end
-  local needs_obfus_scan = lc:find("fromcharcode", 1, true) or lc:find("window%[", 1, false) or lc:find("this%[", 1, false) or lc:find("%.join%s*%(", 1, false)
+
+  if has_long_base64_sequence(lc, LSCAN.long_html_b64_threshold or 1200) then
+    ctx:add_module_reason(mod, "b64_long_html")
+  end
+
+  local needs_obfus_scan =
+    lc:find("fromcharcode", 1, true) or
+    lc:find("window%[", 1, false) or
+    lc:find("this%[", 1, false) or
+    lc:find("%.join%s*%(", 1, false)
+
   if needs_obfus_scan then
     local obfus_res = detect_string_obfuscation(lc)
-    if obfus_res.hit then ctx:add_module_reason(obf_mod, "atob_obfuscated"); ctx:add_module_reasons(obf_mod, obfus_res.reasons) end
+    if obfus_res.hit then
+      ctx:add_module_reason(obf_mod, "atob_obfuscated")
+      ctx:add_module_reasons(obf_mod, obfus_res.reasons)
+    end
   end
+
   detect_advanced_api_calls(lc, function(why)
     local target_mod = REASON_MODULE_MAP[why] or mod
     ctx:add_module_reason(target_mod, why)
   end)
-  if lc:find("<iframe", 1, true) and lc:find("src%s*=", 1, false) then ctx:add_module_reason(mod, "iframe_src") end
-  if lc:find("src%s*=", 1, false) and lc:find("data:", 1, true) then ctx:add_module_reason(mod, "data_uri") end
-  if has_obfuscated_api_call(lc) then ctx:add_module_reason(obf_mod, "obfus_api") end
-  if lc:find("function", 1, true) or lc:find("var ", 1, true) or lc:find("let ", 1, true) or lc:find("const ", 1, true) then
-    if detect_split_payload(html_view.scan) then ctx:add_module_reason(mod, "split_payload") end
+
+  if lc:find("<iframe", 1, true) and lc:find("src%s*=", 1, false) then
+    ctx:add_module_reason(mod, "iframe_src")
   end
+
+  if lc:find("src%s*=", 1, false) and lc:find("data:", 1, true) then
+    ctx:add_module_reason(mod, "data_uri")
+  end
+
+  if has_obfuscated_api_call(lc) then
+    ctx:add_module_reason(obf_mod, "obfus_api")
+  end
+
+  if lc:find("function", 1, true) or lc:find("var ", 1, true) or lc:find("let ", 1, true) or lc:find("const ", 1, true) then
+    if detect_split_payload(html_view.raw) then
+      ctx:add_module_reason(mod, "split_payload")
+    end
+  end
+
   if lc:find("settimeout", 1, true) or lc:find("setinterval", 1, true) then
-    local delay_res = detect_delayed_execution(html_view.scan)
-    if delay_res.hit then ctx:add_module_reason(mod, "delayed_execution"); ctx:add_module_reasons(mod, delay_res.reasons) end
+    local delay_res = detect_delayed_execution(html_view.raw)
+    if delay_res.hit then
+      ctx:add_module_reason(mod, "delayed_execution")
+      ctx:add_module_reasons(mod, delay_res.reasons)
+    end
   end
 end
 
@@ -2007,11 +2310,38 @@ end
 local function scan_geo_targeting_module(ctx, script_raw)
   if not module_enabled("geo_targeting") then return end
   local lc, mod = (script_raw or ""):lower(), "geo_targeting"
-  if not (lc:find("ipapi%.co", 1, false) or lc:find("ipinfo%.io", 1, false) or lc:find("geolocation", 1, true) or lc:find("timezone", 1, true) or lc:find("country_code", 1, true) or lc:find("cf%-ipcountry", 1, true)) then return end
-  local geo_patterns = { "ipapi%.co", "ipinfo%.io", "geoplugin%.net", "cloudflare%.com/cdn%-cgi/trace", "country_code", "x%-country%-code", "cf%-ipcountry" }
-  for _, p in ipairs(geo_patterns) do if lc:find(p, 1, false) then ctx:add_module_reason(mod, "geo_targeting_api"); break end end
-  if lc:find("navigator%.geolocation", 1, false) or lc:find("getcurrentposition", 1, true) or lc:find("geolocation", 1, true) then ctx:add_module_reason(mod, "geo_location_api") end
-  if lc:find("intl%.datetimeformat%(%)%.resolvedoptions%(%)%.timezone", 1, false) or lc:find("gettimezoneoffset%s*%(", 1, false) or lc:find("timezone", 1, true) then ctx:add_module_reason(mod, "timezone_targeting") end
+
+  local has_geo_source =
+    lc:find("ipapi%.co", 1, false) or
+    lc:find("ipinfo%.io", 1, false) or
+    lc:find("geoplugin%.net", 1, false) or
+    lc:find("cloudflare%.com/cdn%-cgi/trace", 1, false) or
+    lc:find("country_code", 1, true) or
+    lc:find("x%-country%-code", 1, false) or
+    lc:find("cf%-ipcountry", 1, false) or
+    lc:find("navigator%.geolocation", 1, false) or
+    lc:find("getcurrentposition", 1, true)
+
+  local has_timezone_logic =
+    lc:find("intl%.datetimeformat%(%)%.resolvedoptions%(%)%.timezone", 1, false) or
+    lc:find("gettimezoneoffset%s*%(", 1, false)
+
+  if not (has_geo_source or has_timezone_logic) then
+    return
+  end
+
+  if has_geo_source then
+    ctx:add_module_reason(mod, "geo_targeting_api")
+  end
+
+  if lc:find("navigator%.geolocation", 1, false) or
+     lc:find("getcurrentposition", 1, true) then
+    ctx:add_module_reason(mod, "geo_location_api")
+  end
+
+  if has_timezone_logic then
+    ctx:add_module_reason(mod, "timezone_targeting")
+  end
 end
 
 local function scan_evasion_module(ctx, script_raw)
@@ -2114,12 +2444,23 @@ local function scan_uint8array_module(ctx, script_raw, meta)
           for i = 1, math.min(16, #byte_values) do header_bytes[#header_bytes + 1] = string.char(byte_clamp(byte_values[i])) end
           local header = table.concat(header_bytes)
           if #header >= 4 then
-            if header:sub(1, 4) == "\000asm" then ctx:set_critical("WASM"); ctx:add_module_reason(mod, "wasm_uint8array")
-            elseif header:sub(1, 2) == "MZ" then ctx:set_critical("PE"); ctx:add_module_reason(mod, "pe_uint8array")
-            elseif header:sub(1, 4) == "PK\003\004" then ctx:add_module_reason(mod, "zip_uint8array")
-            elseif header:sub(1, 5) == "%PDF-" then ctx:add_module_reason(mod, "pdf_uint8array")
-            else ctx:add_module_reason(mod, "large_uint8array") end
-          else ctx:add_module_reason(mod, "large_uint8array") end
+            if header:sub(1, 4) == "\000asm" then
+              ctx:set_critical("WASM")
+              ctx:add_module_reason(mod, "wasm_uint8array")
+            elseif header:sub(1, 2) == "MZ" then
+              ctx:set_critical("PE")
+              ctx:add_module_reason(mod, "pe_uint8array")
+            elseif header:sub(1, 4) == "PK\003\004" then
+              ctx:set_payload_kind("ZIP")
+              ctx:add_module_reason(mod, "zip_uint8array")
+            elseif header:sub(1, 5) == "%PDF-" then
+              ctx:add_module_reason(mod, "pdf_uint8array")
+            else
+              ctx:add_module_reason(mod, "large_uint8array")
+            end
+          else
+            ctx:add_module_reason(mod, "large_uint8array")
+          end
           found = true
           break
         end
@@ -2146,41 +2487,275 @@ local function scan_certificate_script_module(ctx, script_raw)
   end
 end
 
-local function analyze_decoded_blob(ctx, decoded)
-  local kind = sniff_decoded(decoded)
-  if not kind then ctx:add_module_reason("js_smuggling", "dec_bin"); return end
-  local function add_decoded(mod, reason, critical)
-    ctx:add_module_reason(mod, reason)
-    if critical then ctx:set_critical(critical) end
-  end
-  if kind == "PE" then add_decoded("decoded_payload", "dec_pe", "PE"); ctx:add_info("single_sniff_pe"); return end
-  if kind == "WASM" then add_decoded("decoded_payload", "dec_wasm", "WASM"); scan_wasm_binary_module(ctx, decoded); return end
-  if kind == "XML" then
-    if ctx:has_reason("ms_appinstaller_uri") or ctx:has_reason("appinstaller_file") then add_decoded("appinstaller", "dec_xml_appinstaller", "XML_APPINSTALLER")
-    else ctx:add_module_reason("js_smuggling", "dec_xml") end
+local collect_script_entries
+local collect_script_meta
+local scan_script_blocks
+local scan_decoded_payload_module
+local analyze_decoded_blob
+
+local function scan_decoded_html_blob(ctx, decoded_html)
+  local raw_html = clamp_html_size(normalize_text(decoded_html))
+  if raw_html == "" then return end
+
+  scan_appinstaller_module(ctx, raw_html)
+
+  local html_view = build_html_views(raw_html)
+
+  if not Policy.has_basic_js_gate(html_view.raw_lc) then
+    if html_view.raw_lc:find("begin certificate", 1, true) or
+       html_view.raw_lc:find("data:application/x%-x509", 1, false) then
+      scan_certificate_html_module(ctx, html_view)
+    end
     return
   end
-  if kind == "VHDX" then add_decoded("decoded_payload", "dec_vhdx", "VHDX"); return end
-  if kind == "ISO"  then add_decoded("decoded_payload", "dec_iso",  "ISO"); return end
-  if kind == "LNK"  then add_decoded("decoded_payload", "dec_lnk",  "LNK"); return end
-  if kind == "OLE"  then add_decoded("decoded_payload", "dec_ole",  "OLE"); return end
-  if kind == "MSIX" then add_decoded("decoded_payload", "dec_msix", "MSIX"); return end
-  if kind == "APPX" then add_decoded("decoded_payload", "dec_appx", "APPX"); return end
-  if kind == "CAB"  then add_decoded("decoded_payload", "dec_cab",  "CAB"); return end
-  if kind == "7ZIP" then add_decoded("decoded_payload", "dec_7zip", "7ZIP"); return end
-  if kind == "RAR"  then add_decoded("decoded_payload", "dec_rar",  "RAR"); return end
-  if kind == "ZIP"  then add_decoded("decoded_payload", "dec_zip",  "ZIP"); return end
-  if kind == "CHM"  then add_decoded("attachment_vectors", "att_chm_attachment", "CHM"); return end
-  if kind == "HTA"  then add_decoded("attachment_vectors", "att_hta_attachment", "SCRIPT"); return end
-  if kind == "PDF"  then ctx:add_module_reason("js_smuggling", "dec_pdf"); return end
-  if kind == "SVG"  then ctx:add_module_reason("attachment_vectors", "att_svg_smuggling_context"); return end
-  if kind == "VBS" or kind == "PS1" or kind == "BAT" then add_decoded("decoded_payload", "dec_script", "SCRIPT"); return end
-  if kind == "JS"  then ctx:add_module_reason("js_smuggling", "dec_js"); return end
-  if kind == "HTML" then ctx:add_module_reason("js_smuggling", "dec_html"); return end
+
+  local script_entries = collect_script_entries(raw_html)
+
+  scan_js_smuggling_html_module(ctx, html_view)
+  scan_css_exfil_module(ctx, html_view)
+  scan_clickfix_module(ctx, html_view)
+  scan_push_abuse_html_module(ctx, html_view)
+  scan_certificate_html_module(ctx, html_view)
+  scan_script_blocks(ctx, html_view, script_entries)
+  scan_external_scripts_module(ctx, script_entries)
+end
+
+local function scan_decoded_script_blob(ctx, decoded_script)
+  local script_view = build_script_views(decoded_script)
+  local meta = collect_script_meta(script_view)
+
+  if not meta.is_interesting then
+    return
+  end
+
+  scan_uint8array_module(ctx, script_view.raw, meta)
+  if has_any_critical_kind(ctx) then return end
+
+  scan_obfuscation_script_module(ctx, script_view.raw, meta)
+  scan_geo_targeting_module(ctx, script_view.raw)
+  scan_evasion_module(ctx, script_view.raw)
+  scan_persistence_module(ctx, script_view.raw)
+  scan_domain_rotation_module(ctx, script_view.raw)
+  scan_wasm_staging_module(ctx, script_view.raw)
+  scan_blockchain_staging_module(ctx, script_view.raw)
+  scan_certificate_script_module(ctx, script_view.raw)
+
+  if meta.maybe_rc4 then
+    scan_rc4_module(ctx, script_view.raw)
+  end
+
+  if has_any_critical_kind(ctx) then return end
+
+  scan_decoded_payload_module(ctx, script_view.raw, meta)
+end
+
+analyze_decoded_blob = function(ctx, decoded)
+  decoded = normalize_text(decoded)
+  if decoded == "" then
+    ctx:add_module_reason("js_smuggling", "dec_bin")
+    return
+  end
+
+  local kind = sniff_decoded(decoded)
+  if not kind then
+    ctx:add_module_reason("js_smuggling", "dec_bin")
+    return
+  end
+
+  local function add_decoded(mod, reason, kind)
+    ctx:add_module_reason(mod, reason)
+    if kind then
+      local pol = get_reason_policy(reason)
+      if pol and pol.class == "CRITICAL" then
+        ctx:set_critical(kind)
+      else
+        ctx:set_payload_kind(kind)
+      end
+    end
+  end
+
+  if kind == "PE" then
+    add_decoded("decoded_payload", "dec_pe", "PE")
+    ctx:add_info("single_sniff_pe")
+    return
+  end
+
+  if kind == "WASM" then
+    add_decoded("decoded_payload", "dec_wasm", "WASM")
+    scan_wasm_binary_module(ctx, decoded)
+    return
+  end
+
+  if kind == "XML_APPINSTALLER" then
+    add_decoded("appinstaller", "dec_xml_appinstaller", "XML_APPINSTALLER")
+    return
+  end
+
+  if kind == "XML" then
+    local dl = decoded:lower()
+    if dl:find("<appinstaller", 1, true) or
+       ctx:has_reason("ms_appinstaller_uri") or
+       ctx:has_reason("appinstaller_file") or
+       ctx:has_reason("ms_appinstaller_word") then
+      add_decoded("appinstaller", "dec_xml_appinstaller", "XML_APPINSTALLER")
+    else
+      ctx:add_module_reason("js_smuggling", "dec_xml")
+    end
+    return
+  end
+
+  if kind == "VHDX" then
+    add_decoded("decoded_payload", "dec_vhdx", "VHDX")
+    return
+  end
+
+  if kind == "ISO" then
+    add_decoded("decoded_payload", "dec_iso", "ISO")
+    return
+  end
+
+  if kind == "LNK" then
+    add_decoded("decoded_payload", "dec_lnk", "LNK")
+    return
+  end
+
+  if kind == "OLE" then
+    add_decoded("decoded_payload", "dec_ole", "OLE")
+    return
+  end
+
+  if kind == "MSIX" then
+    add_decoded("decoded_payload", "dec_msix", "MSIX")
+    return
+  end
+
+  if kind == "APPX" then
+    add_decoded("decoded_payload", "dec_appx", "APPX")
+    return
+  end
+
+  if kind == "CAB" then
+    add_decoded("decoded_payload", "dec_cab", "CAB")
+    return
+  end
+
+  if kind == "7ZIP" then
+    add_decoded("decoded_payload", "dec_7zip", "7ZIP")
+    return
+  end
+
+  if kind == "RAR" then
+    add_decoded("decoded_payload", "dec_rar", "RAR")
+    return
+  end
+
+  if kind == "ZIP" then
+    add_decoded("decoded_payload", "dec_zip", "ZIP")
+    return
+  end
+
+  if kind == "CHM" then
+    add_decoded("attachment_vectors", "att_chm_attachment", "CHM")
+    return
+  end
+
+  if kind == "HTA" then
+    add_decoded("attachment_vectors", "att_hta_attachment", "SCRIPT")
+    return
+  end
+
+ if kind == "PDF" then
+	ctx:add_module_reason("js_smuggling", "dec_pdf")
+	ctx:set_observed_kind("PDF")
+
+	local pdf_lc = lower_limit_text(decoded, LSCAN.max_attachment_text)
+
+    if pdf_lc:find("/javascript", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_javascript")
+    end
+    if pdf_lc:find("/openaction", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_openaction")
+    end
+    if pdf_lc:find("/launch", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_launch")
+    end
+    if pdf_lc:find("/embeddedfile", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_embeddedfile")
+    end
+    if pdf_lc:find("/richmedia", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_pdf_richmedia")
+    end
+
+    return
+  end
+
+  if kind == "SVG" then
+	ctx:add_module_reason("attachment_vectors", "att_svg_smuggling_context")
+	ctx:set_observed_kind("SVG")
+
+	local svg_lc = lower_limit_text(decoded, LSCAN.max_attachment_text)
+
+    if svg_lc:find("<script", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_script")
+    end
+    if svg_lc:find("onload=", 1, true) or
+       svg_lc:find("onbegin=", 1, true) or
+       svg_lc:find("onclick=", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_event_handler")
+    end
+    if svg_lc:find("foreignobject", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_foreignobject")
+    end
+    if svg_lc:find("xlink:href", 1, true) or
+       svg_lc:find('href="javascript:', 1, true) or
+       svg_lc:find("href='javascript:", 1, true) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_xlink_href")
+    end
+    if svg_lc:find("data:", 1, true) and
+       (svg_lc:find("base64", 1, true) or svg_lc:find("javascript", 1, true)) then
+      ctx:add_module_reason("attachment_vectors", "att_svg_data_uri")
+    end
+
+    return
+  end
+
+  if kind == "VBS" or kind == "PS1" or kind == "BAT" then
+    add_decoded("decoded_payload", "dec_script", "SCRIPT")
+    return
+  end
+
+  if kind == "JS" then
+    ctx:add_module_reason("js_smuggling", "dec_js")
+
+    if ctx.decode_depth >= ctx.max_decode_depth then
+      ctx:add_info("decode_depth_limit")
+      return
+    end
+
+    ctx.decode_depth = ctx.decode_depth + 1
+    scan_decoded_script_blob(ctx, decoded)
+    ctx.decode_depth = ctx.decode_depth - 1
+    return
+  end
+
+  if kind == "HTML" then
+    ctx:add_module_reason("js_smuggling", "dec_html")
+
+    if ctx.decode_depth >= ctx.max_decode_depth then
+      ctx:add_info("decode_depth_limit")
+      return
+    end
+
+    ctx.decode_depth = ctx.decode_depth + 1
+    scan_decoded_html_blob(ctx, decoded)
+    ctx.decode_depth = ctx.decode_depth - 1
+    return
+  end
+
   ctx:add_module_reason("js_smuggling", "dec_bin")
 end
 
-local function collect_script_meta(script_view)
+collect_script_meta = function(script_view)
   local sl = script_view.lc
   local maybe_b64    = sl:find("atob", 1, true) ~= nil or sl:find("base64", 1, true) ~= nil
   local maybe_concat = sl:find("%+=", 1, false) ~= nil or sl:find(".join", 1, true) ~= nil
@@ -2191,68 +2766,210 @@ local function collect_script_meta(script_view)
   local maybe_web3   = sl:find("ethers", 1, true) ~= nil or sl:find("web3", 1, true) ~= nil or sl:find("ethereum", 1, true) ~= nil
   local maybe_css    = sl:find("getcomputedstyle", 1, true) ~= nil
   local maybe_rc4    = sl:find("rc4", 1, true) ~= nil or sl:find("ksa", 1, true) ~= nil or sl:find("prga", 1, true) ~= nil or (sl:find("decrypt", 1, true) ~= nil and sl:find("key", 1, true) ~= nil)
+
+  local maybe_array_join =
+    (sl:find("%.join%s*%(", 1, false) ~= nil) and
+    (
+      sl:find("%[%s*['\"]", 1, false) ~= nil or
+      sl:find("var%s+[%w_]+%s*=%s*%[", 1, false) ~= nil or
+      sl:find("let%s+[%w_]+%s*=%s*%[", 1, false) ~= nil or
+      sl:find("const%s+[%w_]+%s*=%s*%[", 1, false) ~= nil
+    )
+
   return {
-    maybe_b64 = maybe_b64, maybe_concat = maybe_concat, maybe_obfus = maybe_obfus,
-    maybe_uint8 = maybe_uint8, maybe_hex = maybe_hex, maybe_wasm = maybe_wasm,
-    maybe_web3 = maybe_web3, maybe_css = maybe_css, maybe_rc4 = maybe_rc4,
-    is_interesting = (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or maybe_wasm or maybe_web3 or maybe_css or maybe_rc4),
-    allow_decode_path = (maybe_b64 or maybe_concat or maybe_obfus),
+    maybe_b64 = maybe_b64,
+    maybe_concat = maybe_concat,
+    maybe_obfus = maybe_obfus,
+    maybe_uint8 = maybe_uint8,
+    maybe_hex = maybe_hex,
+    maybe_wasm = maybe_wasm,
+    maybe_web3 = maybe_web3,
+    maybe_css = maybe_css,
+    maybe_rc4 = maybe_rc4,
+    maybe_array_join = maybe_array_join,
+    is_interesting = (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or maybe_wasm or maybe_web3 or maybe_css or maybe_rc4 or maybe_array_join),
+    allow_decode_path = (maybe_b64 or maybe_concat or maybe_obfus or maybe_array_join),
   }
 end
 
-local function scan_decoded_payload_module(ctx, script_raw, meta)
-  if not module_enabled("decoded_payload") or not meta.allow_decode_path then return end
+scan_decoded_payload_module = function(ctx, script_raw, meta)
+  if not module_enabled("decoded_payload") or not meta.allow_decode_path then
+    decode_dbg(
+      ctx.task,
+      "HTML_SMUGGLING_DBG || decoded_payload skip: enabled=%s allow_decode_path=%s",
+      tostring(module_enabled("decoded_payload")),
+      tostring(meta.allow_decode_path)
+    )
+    return
+  end
+
   local sscan = smart_text_scan(script_raw, LSCRIPT.smart_chunk)
   local norm  = sscan:gsub('"%s*%+%s*"', ""):gsub("'%s*%+%s*'", "")
   local virtuals = {}
-  if meta.maybe_concat or meta.maybe_obfus then
-    local deob, vlist, tflag = advanced_deobfuscate(norm, LSCRIPT.deobfus_timeout_ms)
-    norm = deob; virtuals = vlist or {}
+
+  if meta.maybe_concat or meta.maybe_obfus or meta.maybe_array_join then
+    local deob, vlist, tflag = advanced_deobfuscate(script_raw, LSCRIPT.deobfus_timeout_ms)
+    norm = deob
+    virtuals = vlist or {}
     if tflag == 1 then ctx:add_info("deobfus_timeout") end
+    decode_dbg(
+      ctx.task,
+      "HTML_SMUGGLING_DBG || deobfuscate done: virtuals=%d tflag=%d norm_len=%d",
+      #virtuals, tflag, #(norm or "")
+    )
   end
-  if not norm or #norm < (THRESHOLDS.normalized_script_min_len or 40) then return end
+
+  if not norm or #norm < (THRESHOLDS.normalized_script_min_len or 40) then
+    decode_dbg(ctx.task, "HTML_SMUGGLING_DBG || norm too short: %d", #(norm or ""))
+    return
+  end
+
   local max_cand = (LB64.max_candidates or 6)
   if ctx.newsletter then max_cand = math.min(max_cand, 4) end
+
   local cands = extract_b64_candidates(norm, max_cand)
-  if virtuals and #virtuals > 0 then
-    local seen_v = {}
-    for _, v in ipairs(virtuals) do
-      local vv = (v or ""):gsub("%s+", "")
-      if is_frag_base64ish(vv) then
-        local hv = rspamd_util.str_hash(vv)
-        if not seen_v[hv] then seen_v[hv] = true; cands[#cands + 1] = vv end
-      end
-    end
-    ctx:add_module_reason("js_smuggling", "virtual_b64_candidates")
+  local seen_all = {}
+  local added_virtual = false
+     
+  for _, c in ipairs(cands) do
+    seen_all[c] = true
   end
-  if not cands or #cands == 0 then return end
+     
+  decode_dbg(
+    ctx.task,
+    "HTML_SMUGGLING_DBG || extract_b64_candidates: cands=%d virtuals=%d",
+    #cands, #virtuals
+  )
+     
+  if virtuals and #virtuals > 0 then
+  for _, v in ipairs(virtuals) do
+	  local vv = (v or ""):gsub("%s+", "")
+	  local vv_norm = normalize_b64(vv)
+  
+	  decode_dbg(
+	  ctx.task,
+	  "HTML_SMUGGLING_DBG || virtual: len=%d is_b64ish=%s",
+	  #vv, tostring(is_frag_base64ish(vv))
+	  )
+  
+	  if is_frag_base64ish(vv) and not seen_all[vv_norm] then
+	  seen_all[vv_norm] = true
+	  cands[#cands + 1] = vv_norm
+	  added_virtual = true
+	  end
+  end
+  
+  if added_virtual then
+	  ctx:add_module_reason("js_smuggling", "virtual_b64_candidates")
+  end
+  end
+ 
+  if not cands or #cands == 0 then
+    decode_dbg(ctx.task, "HTML_SMUGGLING_DBG || no cands after virtuals")
+    return
+  end
+
   ctx.phase.decode_candidates = ctx.phase.decode_candidates + #cands
+
   local total_b64_len = 0
-  for _, cand in ipairs(cands) do total_b64_len = total_b64_len + #(tostring(cand):gsub("%s+", "")) end
+  for _, cand in ipairs(cands) do
+    total_b64_len = total_b64_len + #(tostring(cand):gsub("%s+", ""))
+  end
+
+  local min_decode_total = tonumber(LB64.min_decode_total) or 400
+
+  decode_dbg(
+    ctx.task,
+    "HTML_SMUGGLING_DBG || total_b64_len=%d min_decode_total=%d cands_total=%d",
+    total_b64_len, min_decode_total, #cands
+  )
+
   if total_b64_len >= (LB64.big_threshold or 5000) then ctx:add_module_reason("js_smuggling", "b64_total_len_big") end
   if total_b64_len >= (LB64.huge_threshold or 20000) then ctx:add_module_reason("js_smuggling", "b64_total_len_huge") end
   if #cands > 1 then ctx:add_module_reason("js_smuggling", "b64_joined_parts") end
-  if total_b64_len < (LB64.min_decode_total or 1500) then return end
-  if REQUIRE_STRONG_GATE_FOR_DECODE and not Policy.has_strong_decode_gate(ctx) then ctx:add_info("decode_gate_not_strong_enough"); return end
-  for _, cand in ipairs(cands) do
+
+  if total_b64_len < min_decode_total then
+    decode_dbg(
+      ctx.task,
+      "HTML_SMUGGLING_DBG || STOP: total_b64_len %d < min_decode_total %d",
+      total_b64_len, min_decode_total
+    )
+    return
+  end
+  
+  if REQUIRE_STRONG_GATE_FOR_DECODE and not Policy.has_strong_decode_gate(ctx) then
+    decode_dbg(ctx.task, "HTML_SMUGGLING_DBG || STOP: decode_gate_not_strong_enough")
+    ctx:add_info("decode_gate_not_strong_enough")
+    return
+  end
+
+  for i, cand in ipairs(cands) do
     local nb = normalize_b64(cand)
+    decode_dbg(
+      ctx.task,
+      "HTML_SMUGGLING_DBG || decode attempt %d: cand_len=%d nb_len=%d",
+      i, #cand, #(nb or "")
+    )
     if nb and #nb >= 40 then
       local decoded = safe_decode_base64(ctx.task, nb, LDEC.max_bytes)
       if decoded and #decoded > 0 then
         ctx.phase.decode_success = ctx.phase.decode_success + 1
+        local first4 = ""
+        if type(decoded) == "string" and #decoded > 0 then
+          first4 = decoded:sub(1, 4):gsub(".", function(c)
+            return string.format("%02X", c:byte())
+          end)
+        end
+
+        decode_dbg(
+          ctx.task,
+          "HTML_SMUGGLING_DBG || decoded: len=%d first4=%s",
+          #decoded,
+          first4
+        )
         analyze_decoded_blob(ctx, decoded)
-        if has_any_critical_kind(ctx) then break end
+        decode_dbg(
+          ctx.task,
+          "HTML_SMUGGLING_DBG || after analyze: critical_kind=%s",
+          tostring(ctx.critical_kind)
+        )
+
+        if has_any_critical_kind(ctx) or
+           ctx:has_reason("dec_script") or
+           ctx:has_reason("dec_lnk") or
+           ctx:has_reason("dec_iso") or
+           ctx:has_reason("dec_msix") or
+           ctx:has_reason("dec_appx") then
+          break
+        end
       else
         ctx.phase.decode_fail = ctx.phase.decode_fail + 1
+        decode_dbg(ctx.task, "HTML_SMUGGLING_DBG || decode FAILED cand %d", i)
       end
     end
   end
-end
 
+  -- dec_bin aufraeumen wenn spaeter ein genauer harter Treffer vorliegt
+  if ctx:has_reason("dec_pe") or
+     ctx:has_reason("dec_wasm") or
+     ctx:has_reason("dec_msix") or
+     ctx:has_reason("dec_appx") or
+     ctx:has_reason("dec_zip") or
+     ctx:has_reason("dec_iso") or
+     ctx:has_reason("dec_lnk") or
+     ctx:has_reason("dec_rar") or
+     ctx:has_reason("dec_7zip") or
+     ctx:has_reason("dec_cab") or
+     ctx:has_reason("dec_vhdx") or
+     ctx:has_reason("dec_ole") or
+     ctx:has_reason("dec_script") then
+    ctx.reasons["dec_bin"] = nil
+  end
+end
 -- =========================
 -- Script Entry Sammeln und Deep Scan
 -- =========================
-local function collect_script_entries(html)
+collect_script_entries = function(html)
   local entries = {}
   if not html or #html < 10 then return entries end
   local script_min = THRESHOLDS.script_min_len or 20
@@ -2292,6 +3009,8 @@ local function score_script_interest(entry)
   if lc:find("_0x", 1, true) then score = score + 2 end
   if lc:find("%+=", 1, false) then score = score + 1 end
   if has_long_base64_sequence(lc, 100) then score = score + 3 end
+  -- FIX v4.3.7b: Array-Join Pattern als Interest-Signal
+  if lc:find("%.join%s*%(", 1, false) and lc:find("%[", 1, false) then score = score + 2 end
   return score
 end
 
@@ -2311,7 +3030,7 @@ local function select_top_script_entries(entries, max_check)
 end
 
 local function is_script_budget_exceeded(ctx, script_loop_start)
-  local dt_ms = (rspamd_util.get_ticks() - script_loop_start) / 1000.0
+  local dt_ms = elapsed_ms(script_loop_start)
   if dt_ms > (LSCRIPT.max_script_time_ms or 80.0) then ctx:add_info("script_time_budget"); return true end
   if ctx.total_script_scanned >= (LSCRIPT.max_total_script_scan or 120000) then ctx:add_info("script_total_budget"); return true end
   return false
@@ -2340,15 +3059,19 @@ local function analyze_script_block(ctx, html_view, entry)
   scan_decoded_payload_module(ctx, script_view.raw, meta)
 end
 
-local function scan_script_blocks(ctx, html_view, script_entries)
+scan_script_blocks = function(ctx, html_view, script_entries)
   if not ctx.deep_scan or not Policy.should_deep_scan_scripts(ctx, html_view) then return end
   local selected = select_top_script_entries(script_entries, LSCRIPT.max_check or 3)
-  local script_loop_start = rspamd_util.get_ticks()
+  local script_loop_start = rspamd_util.get_time()
   for _, entry in ipairs(selected) do
     ctx.phase.script_blocks_seen = ctx.phase.script_blocks_seen + 1
     if is_script_budget_exceeded(ctx, script_loop_start) then break end
     local ok_script, err = pcall(function() analyze_script_block(ctx, html_view, entry); ctx.phase.script_blocks_scanned = ctx.phase.script_blocks_scanned + 1 end)
-    if not ok_script then ctx:add_error("analyze_script_block failed: " .. tostring(err)) end
+	if not ok_script then
+	  local emsg = tostring(err or "unknown")
+	  ctx:add_error("analyze_script_block failed: " .. emsg)
+	  rspamd_logger.errx(ctx.task, "HTML_SMUGGLING_SCRIPT_ERROR || " .. emsg)
+	end
     if has_any_critical_kind(ctx) then break end
   end
 end
@@ -2388,12 +3111,40 @@ local function scan_attachment_vectors_module(ctx, part)
     end
   end
 
-  if fname:match("%.chm$") then ctx:add_module_reason(mod, "att_chm_attachment"); ctx:set_critical("CHM"); hit = true end
-  if fname:match("%.hta$") then ctx:add_module_reason(mod, "att_hta_attachment"); ctx:set_critical("SCRIPT"); hit = true end
-  if fname:match("%.one$") then ctx:add_module_reason(mod, "att_onenote_attachment"); ctx:set_critical("ONENOTE"); hit = true end
-  if fname:match("%.lnk$") then ctx:add_module_reason(mod, "att_lnk_attachment"); ctx:set_critical("LNK"); hit = true end
-  if fname:match("%.docm$") or fname:match("%.xlsm$") or fname:match("%.pptm$") then ctx:add_module_reason(mod, "att_office_macro_container"); hit = true end
-  if fname:match("%.js$") or fname:match("%.jse$") or fname:match("%.vbs$") or fname:match("%.vbe$") or fname:match("%.ps1$") or fname:match("%.wsf$") or fname:match("%.bat$") or fname:match("%.cmd$") then ctx:add_module_reason(mod, "att_script_attachment"); ctx:set_critical("SCRIPT"); hit = true end
+  if fname:match("%.chm$") then
+    ctx:add_module_reason(mod, "att_chm_attachment")
+    ctx:set_payload_kind("CHM")
+    hit = true
+  end
+
+  if fname:match("%.hta$") then
+    ctx:add_module_reason(mod, "att_hta_attachment")
+    ctx:set_payload_kind("SCRIPT")
+    hit = true
+  end
+
+  if fname:match("%.one$") then
+    ctx:add_module_reason(mod, "att_onenote_attachment")
+    ctx:set_payload_kind("ONENOTE")
+    hit = true
+  end
+
+  if fname:match("%.lnk$") then
+    ctx:add_module_reason(mod, "att_lnk_attachment")
+    ctx:set_payload_kind("LNK")
+    hit = true
+  end
+
+  if fname:match("%.docm$") or fname:match("%.xlsm$") or fname:match("%.pptm$") then
+    ctx:add_module_reason(mod, "att_office_macro_container")
+    hit = true
+  end
+
+  if fname:match("%.js$") or fname:match("%.jse$") or fname:match("%.vbs$") or fname:match("%.vbe$") or fname:match("%.ps1$") or fname:match("%.wsf$") or fname:match("%.bat$") or fname:match("%.cmd$") then
+    ctx:add_module_reason(mod, "att_script_attachment")
+    ctx:set_payload_kind("SCRIPT")
+    hit = true
+  end
   if fname:match("%.html?$") and text ~= "" and Policy.has_basic_js_gate(text) then ctx:add_module_reason(mod, "att_html_attachment"); hit = true end
 
   if hit then ctx.phase.attach_parts_scanned = ctx.phase.attach_parts_scanned + 1 end
@@ -2430,24 +3181,51 @@ end
 -- =========================
 local function scan_html_part(ctx, part)
   ctx.phase.html_parts_seen = ctx.phase.html_parts_seen + 1
+
   local ok_content, content = pcall(function() return part:get_content() end)
-  if not ok_content or not content then ctx:add_error("part:get_content failed"); return end
+  if not ok_content or not content then
+    ctx:add_error("part:get_content failed")
+    return
+  end
+
   local ok_scan, err = pcall(function()
     local raw_html = normalize_text(content)
     raw_html = clamp_html_size(raw_html)
+
+    local fname = part_get_filename_lc(part)
+    local ctype = part_get_type_lc(part)
+
+    local attachment_like_html =
+      (fname:match("%.html?$") ~= nil) or
+      (fname:match("%.svg$") ~= nil) or
+      (ctype:find("image/svg+xml", 1, true) ~= nil)
+
+    if attachment_like_html then
+      scan_attachment_vectors_module(ctx, part)
+    end
+
     scan_appinstaller_module(ctx, raw_html)
+
     local html_view = build_html_views(raw_html)
+
     if not Policy.has_basic_js_gate(html_view.raw_lc) then
-      if html_view.raw_lc:find("begin certificate", 1, true) or html_view.raw_lc:find("data:application/x%-x509", 1, false) then scan_certificate_html_module(ctx, html_view) end
+      if html_view.raw_lc:find("begin certificate", 1, true) or
+         html_view.raw_lc:find("data:application/x%-x509", 1, false) then
+        scan_certificate_html_module(ctx, html_view)
+      end
       return
     end
+
     ctx.phase.html_parts_scanned = ctx.phase.html_parts_scanned + 1
+
     if (not ctx.newsletter) and html_view.scan_lc:find("view in browser", 1, true) then
       ctx.newsletter = true
       ctx.newsletter_reason = "view_in_browser_link"
       ctx.heur_mul = compute_heur_mul(ctx.task, ctx.newsletter, ctx.newsletter_reason)
     end
+
     local script_entries = collect_script_entries(raw_html)
+
     scan_js_smuggling_html_module(ctx, html_view)
     scan_css_exfil_module(ctx, html_view)
     scan_clickfix_module(ctx, html_view)
@@ -2456,7 +3234,10 @@ local function scan_html_part(ctx, part)
     scan_script_blocks(ctx, html_view, script_entries)
     scan_external_scripts_module(ctx, script_entries)
   end)
-  if not ok_scan then ctx:add_error("scan_html_part failed: " .. tostring(err)) end
+
+  if not ok_scan then
+    ctx:add_error("scan_html_part failed: " .. tostring(err))
+  end
 end
 
 local function scan_non_html_part(ctx, part)
@@ -2494,7 +3275,10 @@ local function finalize_score(ctx)
   local final_soft = soft_part * ctx.heur_mul
   local score = final_soft + hard_part
   ctx.after_combos = score
-  if ctx.critical_kind and RUNTIME_CRITICAL_BOOST > 0 then score = score + RUNTIME_CRITICAL_BOOST; ctx:add_info("critical_boost") end
+  if ctx.found_categories.CRITICAL and ctx.critical_kind and RUNTIME_CRITICAL_BOOST > 0 then
+    score = score + RUNTIME_CRITICAL_BOOST
+    ctx:add_info("critical_boost")
+  end
   ctx.after_boost = score
   if score > 0 and RUNTIME_MIN_SCORE > 0 and score < RUNTIME_MIN_SCORE then score = RUNTIME_MIN_SCORE; ctx:add_info("min_score") end
   ctx.after_floor = score
@@ -2508,35 +3292,124 @@ end
 -- =========================
 local function build_reason_summary(reasons)
   local tags = {}
-  local function add_tag(tag) for _, v in ipairs(tags) do if v == tag then return end end; tags[#tags + 1] = tag end
-  if reasons["dec_pe"] or reasons["pe_uint8array"] then add_tag("[KRITISCH:EXE]") end
-  if reasons["dec_wasm"] or reasons["wasm_uint8array"] then add_tag("[KRITISCH:WASM]") end
-  if reasons["dec_msix"] or reasons["dec_appx"] or reasons["ms_appinstaller_uri"] or reasons["dec_xml_appinstaller"] then add_tag("[APPINSTALLER]") end
-  if reasons["dec_zip"] or reasons["dec_iso"] or reasons["dec_lnk"] or reasons["dec_vhdx"] or reasons["dec_ole"] or reasons["dec_cab"] or reasons["dec_7zip"] or reasons["dec_rar"] or reasons["att_chm_attachment"] or reasons["att_onenote_attachment"] or reasons["att_office_macro_container"] then add_tag("[CONTAINER]") end
-  if reasons["dec_script"] or reasons["dec_js"] or reasons["dec_html"] or reasons["att_hta_attachment"] or reasons["att_script_attachment"] then add_tag("[SCRIPT_PAYLOAD]") end
-  if reasons["atob_obfuscated"] or reasons["obfus_api"] or reasons["polymorphic_obfuscation"] or reasons["hex_array"] or reasons["fromcharcode_api"] then add_tag("[VERSCHLEIERT]") end
-  if reasons["atob"] or reasons["blob"] or reasons["createObjectURL"] or reasons["fetch"] or reasons["split_payload"] or reasons["delayed_execution"] or reasons["uint8array_payload"] or reasons["att_svg_smuggling_context"] then add_tag("[JS_SMUGGLING]") end
-  if reasons["geo_targeting_api"] or reasons["geo_location_api"] then add_tag("[GEO_TARGETING]") end
-  if reasons["antisandbox_webdriver"] or reasons["hardware_check_evasion"] then add_tag("[EVASION]") end
-  if reasons["localstorage_persistence"] or reasons["sessionstorage_persistence"] then add_tag("[PERSISTENCE]") end
-  if reasons["domain_rotation"] or reasons["computed_redirect"] then add_tag("[ROTATION]") end
-  if reasons["external_scripts"] then add_tag("[EXTERNAL_SCRIPT]") end
-  if reasons["css_exfiltration"] then add_tag("[CSS_ABUSE]") end
-  if reasons["clickfix_lure"] or reasons["fake_captcha_lure"] then add_tag("[CLICKFIX]") end
-  if reasons["wasm_staged_payload"] or reasons["wasm_fetch_stage"] then add_tag("[WASM_STAGING]") end
-  if reasons["blockchain_staged_payload"] or reasons["web3_api_usage"] then add_tag("[BLOCKCHAIN_STAGE]") end
-  if reasons["css_code_execution"] or reasons["css_computedstyle_exec"] then add_tag("[CSS_CODE_EXEC]") end
-  if reasons["att_pdf_javascript"] or reasons["att_pdf_openaction"] or reasons["att_pdf_launch"] then add_tag("[PDF_ACTIVE]") end
-  if reasons["att_svg_script"] or reasons["att_svg_event_handler"] then add_tag("[SVG_ACTIVE]") end
-  if reasons["cert_inline_pem"] or reasons["cert_inline_pkcs"] or reasons["cert_data_uri"] then add_tag("[CERT_SMUGGLING]") end
-  if #tags == 0 then add_tag("[HTML_SMUGGLING]") end
+
+  local function add_tag(tag)
+    for _, v in ipairs(tags) do
+      if v == tag then return end
+    end
+    tags[#tags + 1] = tag
+  end
+
+  if reasons["dec_pe"] or reasons["pe_uint8array"] then
+    add_tag("[KRITISCH:EXE]")
+  end
+
+  if reasons["dec_wasm"] or reasons["wasm_uint8array"] then
+    add_tag("[KRITISCH:WASM]")
+  end
+
+  if reasons["dec_msix"] or reasons["dec_appx"] or reasons["ms_appinstaller_uri"] or
+    reasons["dec_xml_appinstaller"] or reasons["appinstaller_file"] or
+    reasons["ms_appinstaller_word"] then
+    add_tag("[APPINSTALLER]")
+  end
+
+  if reasons["dec_zip"] or reasons["zip_uint8array"] or reasons["dec_iso"] or reasons["dec_lnk"] or reasons["dec_vhdx"] or
+     reasons["dec_ole"] or reasons["dec_cab"] or reasons["dec_7zip"] or reasons["dec_rar"] or
+     reasons["att_chm_attachment"] or reasons["att_onenote_attachment"] or
+     reasons["att_office_macro_container"] or reasons["att_lnk_attachment"] then
+    add_tag("[CONTAINER]")
+  end
+
+  if reasons["dec_script"] or reasons["dec_js"] or reasons["dec_html"] or
+     reasons["att_hta_attachment"] or reasons["att_script_attachment"] then
+    add_tag("[SCRIPT_PAYLOAD]")
+  end
+
+  if reasons["atob_obfuscated"] or reasons["obfus_api"] or reasons["polymorphic_obfuscation"] or
+     reasons["hex_array"] or reasons["fromcharcode_api"] or reasons["array_join_concat"] then
+    add_tag("[VERSCHLEIERT]")
+  end
+
+  if reasons["atob"] or reasons["blob"] or reasons["createObjectURL"] or reasons["fetch"] or
+     reasons["split_payload"] or reasons["delayed_execution"] or reasons["uint8array_payload"] or
+     reasons["att_svg_smuggling_context"] or reasons["b64_joined_parts"] or reasons["virtual_b64_candidates"] then
+    add_tag("[JS_SMUGGLING]")
+  end
+
+  if reasons["antisandbox_webdriver"] or reasons["hardware_check_evasion"] or reasons["human_interaction_required"] then
+    add_tag("[EVASION]")
+  end
+
+  if reasons["geo_targeting_api"] or reasons["geo_location_api"] or reasons["timezone_targeting"] then
+    add_tag("[GEO_TARGETING]")
+  end
+
+  if reasons["webcrypto_api"] or reasons["serviceworker_api"] or reasons["webworker"] or
+     reasons["webassembly"] or reasons["qr_canvas_api"] then
+    add_tag("[SUSPICIOUS_API]")
+  end
+
+  if reasons["localstorage_persistence"] or reasons["sessionstorage_persistence"] then
+    add_tag("[PERSISTENCE]")
+  end
+
+  if reasons["domain_rotation"] or reasons["computed_redirect"] then
+    add_tag("[ROTATION]")
+  end
+
+  if reasons["external_scripts"] then
+    add_tag("[EXTERNAL_SCRIPT]")
+  end
+
+  if reasons["css_exfiltration"] then
+    add_tag("[CSS_ABUSE]")
+  end
+
+  if reasons["clickfix_lure"] or reasons["fake_captcha_lure"] or
+     reasons["clipboard_exec_lure"] or reasons["run_dialog_lure"] or
+     reasons["powershell_lure"] then
+    add_tag("[CLICKFIX]")
+  end
+
+  if reasons["wasm_staged_payload"] or reasons["wasm_fetch_stage"] then
+    add_tag("[WASM_STAGING]")
+  end
+
+  if reasons["blockchain_staged_payload"] or reasons["web3_api_usage"] then
+    add_tag("[BLOCKCHAIN_STAGE]")
+  end
+
+  if reasons["css_code_execution"] or reasons["css_computedstyle_exec"] then
+    add_tag("[CSS_CODE_EXEC]")
+  end
+
+  if reasons["att_pdf_javascript"] or reasons["att_pdf_openaction"] or reasons["att_pdf_launch"] or
+     reasons["att_pdf_embeddedfile"] or reasons["att_pdf_richmedia"] then
+    add_tag("[PDF_ACTIVE]")
+  end
+
+  if reasons["att_svg_script"] or reasons["att_svg_event_handler"] or reasons["att_svg_foreignobject"] or
+     reasons["att_svg_xlink_href"] or reasons["att_svg_data_uri"] then
+    add_tag("[SVG_ACTIVE]")
+  end
+
+  if reasons["cert_inline_pem"] or reasons["cert_inline_pkcs"] or reasons["cert_data_uri"] or
+     reasons["cert_base64_block"] then
+    add_tag("[CERT_SMUGGLING]")
+  end
+
+  if #tags == 0 then
+    add_tag("[HTML_SMUGGLING]")
+  end
+
   return table.concat(tags, " ")
 end
 
 -- =========================
 -- Logging
 -- =========================
-local function log_detection_extended(task, score, critical_kind, NL, NL_reason, reasons, info_reasons, external_scripts, dur_ms)
+local function log_detection_extended(task, score, payload_kind, NL, NL_reason, reasons, info_reasons, external_scripts, dur_ms)
   local why, info = table_keys_sorted(reasons), table_keys_sorted(info_reasons)
   local from = task:get_from_addr()
   local from_s = from and from:to_string() or "unknown"
@@ -2555,35 +3428,39 @@ local function log_detection_extended(task, score, critical_kind, NL, NL_reason,
   if #subj > 160 then subj = subj:sub(1, 160) end
   if #msgid > 160 then msgid = msgid:sub(1, 160) end
   rspamd_logger.infox(task, string.format(
-    "HTML_SMUGGLING_DETECTION || version=%s || score=%.2f || critical=%s || newsletter=%s || nl_reason=%s || reasons=%s || info=%s || external_scripts=%s || from=%s || to=%s || ip=%s || msgid=%s || subject=%s || dur_ms=%.2f || ts=%d",
-    VERSION, tonumber(score) or 0, safe_str(critical_kind, "none"), safe_str(NL, "false"), safe_str(NL_reason, "none"), table.concat(why, ","), table.concat(info, ","), redact_value(ext_s, 12), redact_value(from_s, 5), redact_value(to_s, 5), redact_value(ip_s, 4), redact_value(msgid, 8), redact_value(subj, 16), tonumber(dur_ms) or 0, os.time()
+    "HTML_SMUGGLING_DETECTION || version=%s || score=%.2f || payload=%s || newsletter=%s || nl_reason=%s || reasons=%s || info=%s || external_scripts=%s || from=%s || to=%s || ip=%s || msgid=%s || subject=%s || dur_ms=%.2f || ts=%d",
+    VERSION, tonumber(score) or 0, safe_str(payload_kind, "none"), safe_str(NL, "false"), safe_str(NL_reason, "none"), table.concat(why, ","), table.concat(info, ","), redact_value(ext_s, 12), redact_value(from_s, 5), redact_value(to_s, 5), redact_value(ip_s, 4), redact_value(msgid, 8), redact_value(subj, 16), tonumber(dur_ms) or 0, os.time()
   ))
 end
 
 local function log_result(ctx, summary, det_s, info_s)
   local ok_log, err = pcall(function()
+      local effective_kind = ctx.critical_kind or ctx.payload_kind or ctx.observed_kind
     if DEBUG or SCORE_DEBUG then
       rspamd_logger.infox(ctx.task, string.format(
         "HTML_SMUGGLING_SCORE_DEBUG || v=%s || raw=%.2f || after_combos=%.2f || after_boost=%.2f || after_floor=%.2f || final=%.2f || heur_mul=%.2f || newsletter=%s || nl_reason=%s || reasons=%s || info=%s || combo_soft=%.2f || combo_hard=%.2f || hard_present=%s || class_js=%s || class_obfus=%s || class_api=%s || class_evasion=%s || class_container=%s || class_script_hard=%s || class_critical=%s || soft_bonus=%.2f || hard_bonus=%.2f",
         VERSION, tonumber(ctx.raw_score) or 0, tonumber(ctx.after_combos) or 0, tonumber(ctx.after_boost) or 0, tonumber(ctx.after_floor) or 0, tonumber(ctx.final_score) or 0, tonumber(ctx.heur_mul) or 1.0, safe_str(ctx.newsletter, "false"), safe_str(ctx.newsletter_reason, "none"), det_s, info_s, tonumber(ctx.combo_soft) or 0, tonumber(ctx.combo_hard) or 0, tostring(has_hard_reasons(ctx)), tostring(ctx.found_categories.JS_SMUGGLING), tostring(ctx.found_categories.OBFUSCATION), tostring(ctx.found_categories.SUSPICIOUS_API), tostring(ctx.found_categories.EVASION), tostring(ctx.found_categories.CONTAINER), tostring(ctx.found_categories.SCRIPT_HARD), tostring(ctx.found_categories.CRITICAL), tonumber(ctx.soft_bonus_score) or 0, tonumber(ctx.hard_bonus_score) or 0
       ))
     end
-    local dur_ms = (rspamd_util.get_ticks() - ctx.started_at) / 1000.0
+    local dur_ms = elapsed_ms(ctx.started_at)
     if ENABLE_PHASE_DEBUG then
       rspamd_logger.infox(ctx.task, string.format(
         "HTML_SMUGGLING_PHASE_DEBUG || v=%s || html_seen=%d || html_scanned=%d || attach_seen=%d || attach_scanned=%d || script_seen=%d || script_scanned=%d || decode_candidates=%d || decode_success=%d || decode_fail=%d || errors=%d",
         VERSION, tonumber(ctx.phase.html_parts_seen) or 0, tonumber(ctx.phase.html_parts_scanned) or 0, tonumber(ctx.phase.attach_parts_seen) or 0, tonumber(ctx.phase.attach_parts_scanned) or 0, tonumber(ctx.phase.script_blocks_seen) or 0, tonumber(ctx.phase.script_blocks_scanned) or 0, tonumber(ctx.phase.decode_candidates) or 0, tonumber(ctx.phase.decode_success) or 0, tonumber(ctx.phase.decode_fail) or 0, #(ctx.errors or {})
       ))
     end
+	if #(ctx.errors or {}) > 0 then
+	  rspamd_logger.errx(ctx.task, "HTML_SMUGGLING_ERRORS || " .. table.concat(ctx.errors, " || "))
+	end	
     if (FORCE_EXTENDED_LOG and ctx.final_score >= FORCE_EXTENDED_LOG_MIN_SCORE) or (ctx.final_score >= LOG_SCORE_THRESHOLD) or DEBUG then
-      log_detection_extended(ctx.task, ctx.final_score, ctx.critical_kind, ctx.newsletter, ctx.newsletter_reason, ctx.reasons, ctx.info_reasons, ctx.external_scripts, dur_ms)
+      log_detection_extended(ctx.task, ctx.final_score, effective_kind, ctx.newsletter, ctx.newsletter_reason, ctx.reasons, ctx.info_reasons, ctx.external_scripts, dur_ms)
     end
     if (ctx.final_score >= LOG_SCORE_THRESHOLD or DEBUG) and LOG_SIMPLE_LINE then
       local from = ctx.task:get_from_addr()
       local from_s = from and from:to_string() or "unknown"
       rspamd_logger.infox(ctx.task, string.format(
-        "HTML_SMUGGLING %s || score=%.2f || critical=%s || NL=%s(%s) || heur_mul=%.2f || deep_scan=%s || summary=%s || reasons=%s || info=%s || external=%s || from=%s || subject=%s || dur_ms=%.2f",
-        VERSION, tonumber(ctx.final_score) or 0, safe_str(ctx.critical_kind, "none"), safe_str(ctx.newsletter, "false"), safe_str(ctx.newsletter_reason, "none"), tonumber(ctx.heur_mul) or 1.0, safe_str(ctx.deep_scan, "true"), summary, det_s, info_s, safe_str(table.concat(dedupe_list_limit(ctx.external_scripts, MAX_EXTERNAL_REPORTED), ","), ""), redact_value(from_s, 5), redact_value(ctx.task:get_subject() or "", 16), tonumber(dur_ms) or 0
+        "HTML_SMUGGLING %s || score=%.2f || payload=%s || NL=%s(%s) || heur_mul=%.2f || deep_scan=%s || summary=%s || reasons=%s || info=%s || external=%s || from=%s || subject=%s || dur_ms=%.2f",
+        VERSION, tonumber(ctx.final_score) or 0, safe_str(effective_kind, "none"), safe_str(ctx.newsletter, "false"), safe_str(ctx.newsletter_reason, "none"), tonumber(ctx.heur_mul) or 1.0, safe_str(ctx.deep_scan, "true"), summary, det_s, info_s, safe_str(table.concat(dedupe_list_limit(ctx.external_scripts, MAX_EXTERNAL_REPORTED), ","), ""), redact_value(from_s, 5), redact_value(ctx.task:get_subject() or "", 16), tonumber(dur_ms) or 0
       ))
     end
     if dur_ms >= SLOW_LOG_MS then rspamd_logger.infox(ctx.task, string.format("HTML_SMUGGLING_SLOW || v=%s || dur_ms=%.2f || reasons=%s || info=%s", VERSION, tonumber(dur_ms) or 0, det_s, info_s)) end
@@ -2596,30 +3473,103 @@ end
 -- =========================
 local function apply_markers(ctx)
   local task, reasons, info = ctx.task, ctx.reasons, ctx.info_reasons
-  if reasons["serviceworker_api"] then task:insert_result("HTML_SMUGGLING_MARKER_SERVICEWORKER", 1.0) end
-  if reasons["webcrypto_api"] then task:insert_result("HTML_SMUGGLING_MARKER_WEBCRYPTO", 1.0) end
-  if reasons["qr_canvas_api"] then task:insert_result("HTML_SMUGGLING_MARKER_QR_CANVAS", 1.0) end
-  if reasons["split_payload"] then task:insert_result("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", 1.0) end
-  if reasons["hex_array"] then task:insert_result("HTML_SMUGGLING_MARKER_HEX_ARRAY", 1.0) end
-  if reasons["geo_targeting_api"] or reasons["geo_location_api"] or reasons["timezone_targeting"] then task:insert_result("HTML_SMUGGLING_MARKER_GEO_TARGETING", 1.0) end
-  if reasons["antisandbox_webdriver"] or reasons["hardware_check_evasion"] or reasons["human_interaction_required"] then task:insert_result("HTML_SMUGGLING_MARKER_EVASION", 1.0) end
-  if reasons["localstorage_persistence"] or reasons["sessionstorage_persistence"] then task:insert_result("HTML_SMUGGLING_MARKER_PERSISTENCE", 1.0) end
-  if reasons["domain_rotation"] or reasons["computed_redirect"] then task:insert_result("HTML_SMUGGLING_MARKER_DOMAIN_ROTATION", 1.0) end
-  if reasons["clickfix_lure"] or reasons["fake_captcha_lure"] or reasons["clipboard_exec_lure"] then task:insert_result("HTML_SMUGGLING_MARKER_CLICKFIX", 1.0) end
-  if reasons["wasm_staged_payload"] or reasons["wasm_fetch_stage"] or reasons["wasm_inline_stage"] then task:insert_result("HTML_SMUGGLING_MARKER_WASM_STAGING", 1.0) end
-  if reasons["blockchain_staged_payload"] or reasons["web3_api_usage"] or reasons["ethers_contract_payload"] then task:insert_result("HTML_SMUGGLING_MARKER_BLOCKCHAIN_STAGING", 1.0) end
-  if reasons["css_code_execution"] or reasons["css_computedstyle_exec"] then task:insert_result("HTML_SMUGGLING_MARKER_CSS_CODE_EXEC", 1.0) end
-  if reasons["rc4_ksa_pattern"] or reasons["rc4_prga_pattern"] or reasons["rc4_xor_loop"] then task:insert_result("HTML_SMUGGLING_MARKER_RC4_DECRYPT", 1.0) end
-  if reasons["att_pdf_javascript"] or reasons["att_pdf_openaction"] or reasons["att_pdf_launch"] then task:insert_result("HTML_SMUGGLING_MARKER_PDF_ACTIVE", 1.0) end
-  if reasons["att_svg_script"] or reasons["att_svg_event_handler"] or reasons["att_svg_foreignobject"] then task:insert_result("HTML_SMUGGLING_MARKER_SVG_ACTIVE", 1.0) end
-  if reasons["cert_inline_pem"] or reasons["cert_inline_pkcs"] or reasons["cert_data_uri"] then task:insert_result("HTML_SMUGGLING_MARKER_CERT_SMUGGLING", 1.0) end
-  if info["push_notification_flow"] or info["push_permission_request"] or info["push_serviceworker_combo"] then task:insert_result("HTML_SMUGGLING_MARKER_PUSH_ABUSE", 1.0) end
-  if ctx.found_categories.JS_SMUGGLING then task:insert_result("HTML_SMUGGLING_CLASS_JS", 1.0) end
-  if ctx.found_categories.OBFUSCATION then task:insert_result("HTML_SMUGGLING_CLASS_OBFUS", 1.0) end
-  if ctx.found_categories.SUSPICIOUS_API then task:insert_result("HTML_SMUGGLING_MARKER_SUSPICIOUS_API", 1.0) end
-  if ctx.found_categories.CONTAINER then task:insert_result("HTML_SMUGGLING_CLASS_CONTAINER", 1.0) end
-  if ctx.found_categories.SCRIPT_HARD then task:insert_result("HTML_SMUGGLING_CLASS_SCRIPT_HARD", 1.0) end
-  if ctx.found_categories.CRITICAL then task:insert_result("HTML_SMUGGLING_CLASS_CRITICAL", 1.0) end
+
+  if reasons["serviceworker_api"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_SERVICEWORKER", 1.0)
+  end
+
+  if reasons["webcrypto_api"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_WEBCRYPTO", 1.0)
+  end
+
+  if reasons["qr_canvas_api"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_QR_CANVAS", 1.0)
+  end
+
+  if reasons["split_payload"] or reasons["b64_joined_parts"] or reasons["virtual_b64_candidates"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD", 1.0)
+  end
+
+  if reasons["hex_array"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_HEX_ARRAY", 1.0)
+  end
+
+  if reasons["geo_targeting_api"] or reasons["geo_location_api"] or reasons["timezone_targeting"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_GEO_TARGETING", 1.0)
+  end
+
+  if reasons["antisandbox_webdriver"] or reasons["hardware_check_evasion"] or reasons["human_interaction_required"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_EVASION", 1.0)
+  end
+
+  if reasons["localstorage_persistence"] or reasons["sessionstorage_persistence"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_PERSISTENCE", 1.0)
+  end
+
+  if reasons["domain_rotation"] or reasons["computed_redirect"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_DOMAIN_ROTATION", 1.0)
+  end
+
+  if reasons["clickfix_lure"] or reasons["fake_captcha_lure"] or
+     reasons["clipboard_exec_lure"] or reasons["run_dialog_lure"] or
+     reasons["powershell_lure"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_CLICKFIX", 1.0)
+  end
+
+  if reasons["wasm_staged_payload"] or reasons["wasm_fetch_stage"] or reasons["wasm_inline_stage"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_WASM_STAGING", 1.0)
+  end
+
+  if reasons["blockchain_staged_payload"] or reasons["web3_api_usage"] or reasons["ethers_contract_payload"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_BLOCKCHAIN_STAGING", 1.0)
+  end
+
+  if reasons["css_code_execution"] or reasons["css_computedstyle_exec"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_CSS_CODE_EXEC", 1.0)
+  end
+
+  if reasons["rc4_ksa_pattern"] or reasons["rc4_prga_pattern"] or reasons["rc4_xor_loop"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_RC4_DECRYPT", 1.0)
+  end
+
+  if reasons["att_pdf_javascript"] or reasons["att_pdf_openaction"] or reasons["att_pdf_launch"] or
+     reasons["att_pdf_embeddedfile"] or reasons["att_pdf_richmedia"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_PDF_ACTIVE", 1.0)
+  end
+
+  if reasons["att_svg_script"] or reasons["att_svg_event_handler"] or reasons["att_svg_foreignobject"] or
+     reasons["att_svg_xlink_href"] or reasons["att_svg_data_uri"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_SVG_ACTIVE", 1.0)
+  end
+
+  if reasons["cert_inline_pem"] or reasons["cert_inline_pkcs"] or reasons["cert_data_uri"] or
+     reasons["cert_base64_block"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_CERT_SMUGGLING", 1.0)
+  end
+
+  if info["push_notification_flow"] or info["push_permission_request"] or info["push_serviceworker_combo"] then
+    task:insert_result("HTML_SMUGGLING_MARKER_PUSH_ABUSE", 1.0)
+  end
+
+  if ctx.found_categories.JS_SMUGGLING then
+    task:insert_result("HTML_SMUGGLING_CLASS_JS", 1.0)
+  end
+  if ctx.found_categories.OBFUSCATION then
+    task:insert_result("HTML_SMUGGLING_CLASS_OBFUS", 1.0)
+  end
+  if ctx.found_categories.SUSPICIOUS_API then
+    task:insert_result("HTML_SMUGGLING_MARKER_SUSPICIOUS_API", 1.0)
+  end
+  if ctx.found_categories.CONTAINER then
+    task:insert_result("HTML_SMUGGLING_CLASS_CONTAINER", 1.0)
+  end
+  if ctx.found_categories.SCRIPT_HARD then
+    task:insert_result("HTML_SMUGGLING_CLASS_SCRIPT_HARD", 1.0)
+  end
+  if ctx.found_categories.CRITICAL then
+    task:insert_result("HTML_SMUGGLING_CLASS_CRITICAL", 1.0)
+  end
+
   local critical_map = {
     PE = "HTML_SMUGGLING_CRITICAL_PE",
     WASM = "HTML_SMUGGLING_CRITICAL_WASM",
@@ -2638,7 +3588,12 @@ local function apply_markers(ctx)
     CHM = "HTML_SMUGGLING_CRITICAL_CHM",
     ONENOTE = "HTML_SMUGGLING_CRITICAL_ONENOTE",
   }
-  if ctx.critical_kind and critical_map[ctx.critical_kind] then task:insert_result(critical_map[ctx.critical_kind], 1.0) end
+
+  local marker_kind = ctx.critical_kind or ctx.payload_kind
+  
+  if marker_kind and critical_map[marker_kind] then
+    task:insert_result(critical_map[marker_kind], 1.0)
+  end
 end
 
 -- =========================
