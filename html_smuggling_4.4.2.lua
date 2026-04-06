@@ -785,13 +785,6 @@ local function is_frag_base64ish(s)
   return s:match("^[A-Za-z0-9%+/_=-]+$") ~= nil
 end
 
-local function is_base64ish(s)
-  if not s or #s < (LB64.min_len or 200) then return false end
-  local t = s:gsub("%s+", "")
-  if not t:match("^[A-Za-z0-9%+/_=-]+$") then return false end
-  return true
-end
-
 local function safe_decode_base64(task, b64, limit)
   local ok, res = pcall(function()
     return rspamd_util.decode_base64(b64, limit)
@@ -971,11 +964,6 @@ local function part_get_content_text(part, max_bytes)
   local maxb = tonumber(max_bytes) or tonumber(LSCAN.max_attachment_text) or (300 * 1024)
   if #s > maxb then s = s:sub(1, maxb) end
   return s
-end
-
-local function filename_has_ext(name, ext)
-  if not name or name == "" then return false end
-  return name:sub(-#ext) == ext
 end
 
 -- =========================
