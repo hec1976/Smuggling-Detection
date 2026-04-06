@@ -181,6 +181,49 @@ local DEFAULT_MODULES = {
   rc4_detection        = { enabled = false, info_only = false, weight_override = nil },
 }
 
+local DEFAULT_NEWSLETTER_DETECTION = {
+  classify_headers = {
+    "X-HEC-MailClass",
+    "X-HEC-Category",
+    "X-FortiMail-Profile",
+  },
+  classify_keywords = {
+    "newsletter",
+    "marketing",
+    "bulk",
+  },
+
+  list_id_headers = {
+    "List-Id",
+  },
+
+  list_unsubscribe_headers = {
+    "List-Unsubscribe",
+  },
+
+  precedence_headers = {
+    "Precedence",
+    "X-Precedence",
+  },
+  precedence_keywords = {
+    "bulk",
+  },
+
+  x_mailer_headers = {
+    "X-Mailer",
+  },
+  x_mailer_patterns = {
+    { pattern = "mailchimp",       reason = "mailer_mailchimp" },
+    { pattern = "sendgrid",        reason = "mailer_sendgrid" },
+    { pattern = "salesforce",      reason = "mailer_sfmc" },
+    { pattern = "marketing cloud", reason = "mailer_sfmc" },
+  },
+
+  html_keywords = {
+    "view in browser",
+  },
+}
+
 -- =========================
 -- REASON_REGISTRY
 -- Zusammenfuehrung von REASON_MODULE_MAP und DEFAULT_REASON_POLICY.
@@ -404,6 +447,23 @@ local function deep_copy_table(src)
   return out
 end
 
+local function merge_named_config(defaults, overrides)
+  local out = deep_copy_table(defaults)
+  if type(overrides) ~= "table" then
+    return out
+  end
+
+  for k, v in pairs(overrides) do
+    if type(v) == "table" then
+      out[k] = deep_copy_table(v)
+    else
+      out[k] = v
+    end
+  end
+
+  return out
+end
+
 local function shallow_copy_table(src)
   local out = {}
   for k, v in pairs(src or {}) do
@@ -460,7 +520,12 @@ if type(CFG.limits) == "table" then merge_numbers_deep_valid(LIMITS, CFG.limits,
 if type(CFG.thresholds) == "table" then merge_numbers(THRESHOLDS, CFG.thresholds) end
 if type(CFG.weights) == "table" then merge_numbers(W, CFG.weights) end
 
-local MODULES        = merge_module_config(DEFAULT_MODULES, CFG.modules)
+local MODULES = merge_module_config(DEFAULT_MODULES, CFG.modules)
+local NEWSLETTER_DETECTION = merge_named_config(
+  DEFAULT_NEWSLETTER_DETECTION,
+  CFG.newsletter_detection
+)
+
 -- REASON_REGISTRY ist die zentrale Quelle fuer:
 --   1. Reason -> Modul    (wird von Detector:add_module_reason() bevorzugt aufgeloest)
 --   2. Reason -> Klasse   (bestimmt Score-Kategorie)
@@ -625,6 +690,75 @@ local function validate_reason_registry(registry, errs)
   end
 end
 
+local function validate_newsletter_detection(cfg, errs)
+  if type(cfg) ~= "table" then
+    errs[#errs + 1] = "newsletter_detection ist kein table"
+    return
+  end
+
+  local function ensure_string_list(field_name)
+    local v = cfg[field_name]
+    if v == nil then return end
+    if type(v) ~= "table" then
+      errs[#errs + 1] = "newsletter_detection." .. field_name .. " ist kein table"
+      return
+    end
+    for i, item in ipairs(v) do
+      if type(item) ~= "string" or item == "" then
+        errs[#errs + 1] = "newsletter_detection." .. field_name .. "[" .. tostring(i) .. "] ist kein gueltiger string"
+      end
+    end
+  end
+
+  ensure_string_list("classify_headers")
+  ensure_string_list("classify_keywords")
+  ensure_string_list("list_id_headers")
+  ensure_string_list("list_unsubscribe_headers")
+  ensure_string_list("precedence_headers")
+  ensure_string_list("precedence_keywords")
+  ensure_string_list("x_mailer_headers")
+  ensure_string_list("html_keywords")
+
+  if cfg.x_mailer_patterns ~= nil then
+    if type(cfg.x_mailer_patterns) ~= "table" then
+      errs[#errs + 1] = "newsletter_detection.x_mailer_patterns ist kein table"
+    else
+      for i, rule in ipairs(cfg.x_mailer_patterns) do
+        if type(rule) ~= "table" then
+          errs[#errs + 1] = "newsletter_detection.x_mailer_patterns[" .. tostring(i) .. "] ist kein table"
+        else
+          if type(rule.pattern) ~= "string" or rule.pattern == "" then
+            errs[#errs + 1] = "newsletter_detection.x_mailer_patterns[" .. tostring(i) .. "].pattern fehlt oder ist ungueltig"
+          end
+          if type(rule.reason) ~= "string" or rule.reason == "" then
+            errs[#errs + 1] = "newsletter_detection.x_mailer_patterns[" .. tostring(i) .. "].reason fehlt oder ist ungueltig"
+          end
+        end
+      end
+    end
+  end
+end
+
+local function text_matches_any_keyword(text, keywords)
+  if type(text) ~= "string" or text == "" or type(keywords) ~= "table" then
+    return false, nil
+  end
+
+  local lc = text:lower()
+
+  for i = 1, #keywords do
+    local kw = keywords[i]
+    if type(kw) == "string" and kw ~= "" then
+      local k = kw:lower()
+      if lc:find(k, 1, true) then
+        return true, k
+      end
+    end
+  end
+
+  return false, nil
+end
+
 local function validate_config_or_raise()
   local errs = {}
   local function add_err(msg) errs[#errs + 1] = msg end
@@ -662,6 +796,7 @@ local function validate_config_or_raise()
   end
 
   validate_reason_registry(REASON_REGISTRY, errs)
+  validate_newsletter_detection(NEWSLETTER_DETECTION, errs)
 
   if #errs > 0 then
     local msg = "html_smuggling config validation failed: " .. table.concat(errs, " | ")
@@ -1004,25 +1139,92 @@ end
 -- =========================
 -- Newsletter Detection
 -- =========================
-local function is_newsletter(task)
-  local h = task:get_header("X-HEC-MailClass") or task:get_header("X-HEC-Category") or task:get_header("X-FortiMail-Profile")
-  if h then
-    local hl = tostring(h):lower()
-    if hl:find("newsletter", 1, true) or hl:find("marketing", 1, true) or hl:find("bulk", 1, true) then
-      return true, "header"
+local function header_exists(task, header_names)
+  if type(header_names) ~= "table" then
+    return false, nil
+  end
+
+  for _, hdr in ipairs(header_names) do
+    if task:get_header(hdr) then
+      return true, hdr
     end
   end
-  if task:get_header("List-Id") then return true, "list-id" end
-  if task:get_header("List-Unsubscribe") then return true, "list-unsub" end
-  local prec = task:get_header("Precedence") or task:get_header("X-Precedence")
-  if prec and tostring(prec):lower():find("bulk", 1, true) then return true, "precedence" end
-  local xm = task:get_header("X-Mailer")
-  if xm then
-    local xml = tostring(xm):lower()
-    if xml:find("mailchimp", 1, true) then return true, "mailer_mailchimp" end
-    if xml:find("sendgrid", 1, true) then return true, "mailer_sendgrid" end
-    if xml:find("salesforce", 1, true) or xml:find("marketing cloud", 1, true) then return true, "mailer_sfmc" end
+
+  return false, nil
+end
+
+local function header_matches_any_keyword(task, header_names, keywords)
+  if type(header_names) ~= "table" or type(keywords) ~= "table" then
+    return false, nil
   end
+
+  for _, hdr in ipairs(header_names) do
+    local val = task:get_header(hdr)
+    if val then
+      local l = tostring(val):lower()
+      for _, kw in ipairs(keywords) do
+        local k = tostring(kw or ""):lower()
+        if k ~= "" and l:find(k, 1, true) then
+          return true, hdr
+        end
+      end
+    end
+  end
+
+  return false, nil
+end
+
+local function is_newsletter(task)
+  local cfg = NEWSLETTER_DETECTION
+
+  local hit = header_matches_any_keyword(
+    task,
+    cfg.classify_headers,
+    cfg.classify_keywords
+  )
+  if hit then
+    return true, "header"
+  end
+
+  local has_list_id = header_exists(task, cfg.list_id_headers)
+  if has_list_id then
+    return true, "list-id"
+  end
+
+  local has_list_unsub = header_exists(task, cfg.list_unsubscribe_headers)
+  if has_list_unsub then
+    return true, "list-unsub"
+  end
+
+  local has_prec, prec_header = header_exists(task, cfg.precedence_headers)
+  if has_prec and prec_header then
+    local prec = task:get_header(prec_header)
+    local prec_l = tostring(prec or ""):lower()
+
+    for _, kw in ipairs(cfg.precedence_keywords or {}) do
+      local k = tostring(kw or ""):lower()
+      if k ~= "" and prec_l:find(k, 1, true) then
+        return true, "precedence"
+      end
+    end
+  end
+
+  for _, hdr in ipairs(cfg.x_mailer_headers or {}) do
+    local xm = task:get_header(hdr)
+    if xm then
+      local xml = tostring(xm):lower()
+
+      for _, rule in ipairs(cfg.x_mailer_patterns or {}) do
+        if type(rule) == "table" and rule.pattern and rule.reason then
+          local pat = tostring(rule.pattern):lower()
+          if pat ~= "" and xml:find(pat, 1, true) then
+            return true, tostring(rule.reason)
+          end
+        end
+      end
+    end
+  end
+
   return false, "none"
 end
 
@@ -1621,22 +1823,54 @@ local function sniff_decoded(bin)
 end
 
 local function part_is_htmlish(p)
-  if not p then return false end
-  if SAFE_PART_ACCESS then
-    local ok_html, is_html = pcall(function() return p:is_html() end)
-    if ok_html and is_html then return true end
-  else
-    if p:is_html() then return true end
+  if not p then
+    return false
   end
+
+  local is_text = safe_call(false, function()
+    return p:is_text()
+  end)
+
+  if is_text then
+    local tp = safe_call(nil, function()
+      return p:get_text()
+    end)
+
+    if tp then
+      local is_html = safe_call(false, function()
+        return tp:is_html()
+      end)
+
+      if is_html then
+        return true
+      end
+    end
+  end
+
   local fname = part_get_filename_lc(p)
-  if fname ~= "" and (fname:match("%.html?$") or fname:match("%.svg$")) then return true end
+  if fname ~= "" and (fname:match("%.html?$") or fname:match("%.svg$")) then
+    return true
+  end
+
   local ctype = part_get_type_lc(p)
-  if ctype ~= "" and (ctype:find("text/html", 1, true) or ctype:find("image/svg+xml", 1, true) or ctype:find("application/xhtml", 1, true)) then return true end
+  if ctype ~= "" and (
+      ctype:find("text/html", 1, true) or
+      ctype:find("image/svg+xml", 1, true) or
+      ctype:find("application/xhtml", 1, true)
+    ) then
+    return true
+  end
+
   local content = part_get_content_text(p, 4096)
   if content ~= "" then
     local lcc = content:lower()
-    if lcc:find("<html", 1, true) or lcc:find("<script", 1, true) or lcc:find("<svg", 1, true) then return true end
+    if lcc:find("<html", 1, true) or
+       lcc:find("<script", 1, true) or
+       lcc:find("<svg", 1, true) then
+      return true
+    end
   end
+
   return false
 end
 
@@ -3099,15 +3333,35 @@ end
 local function scan_html_part(ctx, part)
   ctx.phase.html_parts_seen = ctx.phase.html_parts_seen + 1
 
-  local ok_content, content = pcall(function() return part:get_content() end)
-  if not ok_content or not content then
-    ctx:add_error("part:get_content failed")
-    return
+  local raw_html = ""
+  
+  local tp = safe_call(nil, function()
+  return part:get_text()
+  end)
+  
+  if tp then
+  local is_html = safe_call(false, function()
+	  return tp:is_html()
+  end)
+  
+  if is_html then
+	  raw_html = safe_string_call("", function()
+	  return tp:get_content('raw_utf')
+	  end)
+  end
+  end
+  
+  if raw_html == "" then
+  raw_html = part_get_content_text(part, LSCAN.max_bytes)
+  end
+  
+  if raw_html == "" then
+  ctx:add_error("html part content unavailable")
+  return
   end
 
   local ok_scan, err = pcall(function()
-    local raw_html = normalize_text(content)
-    raw_html = clamp_html_size(raw_html)
+    raw_html = clamp_html_size(normalize_text(raw_html))
 
     local fname = part_get_filename_lc(part)
     local ctype = part_get_type_lc(part)
@@ -3125,6 +3379,18 @@ local function scan_html_part(ctx, part)
 
     local html_view = build_html_views(raw_html)
 
+    if not ctx.newsletter then
+      local hit = text_matches_any_keyword(
+        html_view.scan_lc,
+        NEWSLETTER_DETECTION.html_keywords
+      )
+      if hit then
+        ctx.newsletter = true
+        ctx.newsletter_reason = "html_keyword"
+        ctx.heur_mul = compute_heur_mul(ctx.task, ctx.newsletter, ctx.newsletter_reason)
+      end
+    end
+
     if not Policy.has_basic_js_gate(html_view.raw_lc) then
       if html_view.raw_lc:find("begin certificate", 1, true) or
          html_view.raw_lc:find("data:application/x%-x509", 1, false) then
@@ -3134,12 +3400,6 @@ local function scan_html_part(ctx, part)
     end
 
     ctx.phase.html_parts_scanned = ctx.phase.html_parts_scanned + 1
-
-    if (not ctx.newsletter) and html_view.scan_lc:find("view in browser", 1, true) then
-      ctx.newsletter = true
-      ctx.newsletter_reason = "view_in_browser_link"
-      ctx.heur_mul = compute_heur_mul(ctx.task, ctx.newsletter, ctx.newsletter_reason)
-    end
 
     local script_entries = collect_script_entries(raw_html)
 
@@ -3259,21 +3519,94 @@ local function build_reason_summary(reasons)
   return table.concat(tags, " ")
 end
 
+local function get_log_from_address(task)
+  local mime_from = safe_call(nil, function()
+    return task:get_from('mime')
+  end)
+
+  local smtp_from = safe_call(nil, function()
+    return task:get_from('smtp')
+  end)
+
+  local reply_sender = safe_call(nil, function()
+    return task:get_reply_sender()
+  end)
+
+  local function extract_addr(a)
+    if a == nil then
+      return nil
+    end
+
+    if type(a) == "string" then
+      if a ~= "" then
+        return a
+      end
+      return nil
+    end
+
+    if type(a) ~= "table" then
+      local s = tostring(a)
+      if s ~= "" and s ~= "nil" then
+        return s
+      end
+      return nil
+    end
+
+    if a.addr and a.addr ~= "" then
+      return tostring(a.addr)
+    end
+
+    if a.raw and a.raw ~= "" then
+      return tostring(a.raw)
+    end
+
+    if a.user and a.domain and a.user ~= "" and a.domain ~= "" then
+      return tostring(a.user) .. "@" .. tostring(a.domain)
+    end
+
+    return nil
+  end
+
+  local addr = extract_addr(mime_from)
+  if addr then
+    return addr
+  end
+
+  addr = extract_addr(smtp_from)
+  if addr then
+    return addr
+  end
+
+  addr = extract_addr(reply_sender)
+  if addr then
+    return addr
+  end
+
+  return "unknown"
+end
+
 -- =========================
 -- Logging
 -- =========================
 local function log_detection_extended(task, score, payload_kind, NL, NL_reason, reasons, info_reasons, external_scripts, dur_ms)
   local why, info = table_keys_sorted(reasons), table_keys_sorted(info_reasons)
-  local from = task:get_from_addr()
-  local from_s = from and from:to_string() or "unknown"
+  local from_s = get_log_from_address(task)
   local ext_s = "none"
   if external_scripts and #external_scripts > 0 then ext_s = table.concat(dedupe_list_limit(external_scripts, MAX_EXTERNAL_REPORTED), "|") end
-  local to, to_s = task:get_recipients("smtp"), "unknown"
+  local to, to_s = safe_call(nil, function() return task:get_recipients("smtp") end), "unknown"
   if to and to[1] then
     local a = to[1].addr
-    if type(a) == "string" then to_s = a
-    elseif a and a.to_string then local ok, s = pcall(function() return a:to_string() end); to_s = (ok and s) or tostring(a) or "unknown"
-    else to_s = tostring(a) or "unknown" end
+    if type(a) == "string" and a ~= "" then
+      to_s = a
+    elseif a and a.to_string then
+      local ok, s = pcall(function() return a:to_string() end)
+      to_s = (ok and s and s ~= "" and tostring(s)) or "unknown"
+    elseif a ~= nil then
+      local av = tostring(a)
+      if av ~= "" then
+        to_s = av
+      end
+    end
   end
   local ip_s = tostring(task:get_from_ip() or "unknown")
   local msgid = task:get_message_id() or "none"
@@ -3309,8 +3642,7 @@ local function log_result(ctx, summary, det_s, info_s)
       log_detection_extended(ctx.task, ctx.final_score, effective_kind, ctx.newsletter, ctx.newsletter_reason, ctx.reasons, ctx.info_reasons, ctx.external_scripts, dur_ms)
     end
     if (ctx.final_score >= LOG_SCORE_THRESHOLD or DEBUG) and LOG_SIMPLE_LINE then
-      local from = ctx.task:get_from_addr()
-      local from_s = from and from:to_string() or "unknown"
+      local from_s = get_log_from_address(ctx.task)
       rspamd_logger.infox(ctx.task, string.format(
         "HTML_SMUGGLING %s || score=%.2f || payload=%s || NL=%s(%s) || heur_mul=%.2f || deep_scan=%s || summary=%s || reasons=%s || info=%s || external=%s || from=%s || subject=%s || dur_ms=%.2f",
         VERSION, tonumber(ctx.final_score) or 0, safe_str(effective_kind, "none"), safe_str(ctx.newsletter, "false"), safe_str(ctx.newsletter_reason, "none"), tonumber(ctx.heur_mul) or 1.0, safe_str(ctx.deep_scan, "true"), summary, det_s, info_s, safe_str(table.concat(dedupe_list_limit(ctx.external_scripts, MAX_EXTERNAL_REPORTED), ","), ""), redact_value(from_s, 5), redact_value(ctx.task:get_subject() or "", 16), tonumber(dur_ms) or 0
