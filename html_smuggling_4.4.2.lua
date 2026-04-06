@@ -1,5 +1,5 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.4.2
+-- HTML Smuggling Detection v4.4.2-r1
 --
 -- Aenderungen gegenueber v4.4.0:
 --
@@ -12,14 +12,20 @@
 -- v4.4.2
 --   3. rc4_key_material Duplikat in DEFAULT_REASON_REGISTRY entfernt.
 --   4. merge_reason_registry() ueberschreibt nur class und bonus_module, nicht module.
---   5. module_cfg() gibt nil statt {} bei unbekannten Modulen (module_enabled sicher).
+--   5. module_cfg() gibt nil statt {} bei unbekannten Modulen.
 --   6. validate_reason_registry() prueft REASON_REGISTRY nach dem Merge.
---   7. add_module_reason() loest Modul bevorzugt ueber REASON_REGISTRY auf.
---   8. get_effective_weight() nil-sicher gegen Klassen-Alias-Namen.
+--   7. get_effective_weight() nil-sicher gegen unbekannte Modulnamen.
+--
+-- v4.4.2-r1
+--   8. apply_markers() wird nur noch bei echtem Resultat ueber write_result() aufgerufen.
+--   9. add_module_reason() bevorzugt den aufrufenden Scanner und nutzt REASON_REGISTRY nur als Fallback.
+--  10. safe_part_method() eingefuegt und Part-Helfer daran angebunden.
+--  11. Escape-Erkennung in has_obfuscated_api_call() fuer \\x und \\u verengt.
+--  12. Kommentare auf das neue r1 Verhalten bereinigt.
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.4.2"
+local VERSION = "4.4.2-r1"
 
 -- =========================
 -- Config lesen
@@ -387,6 +393,8 @@ local DEFAULT_REASON_REGISTRY = {
   att_office_macro_container  = { module = "attachment_vectors", class = "CONTAINER" },
   att_lnk_attachment          = { module = "attachment_vectors", class = "CONTAINER" },
   att_script_attachment       = { module = "attachment_vectors", class = "SCRIPT_HARD" },
+  wasm_binary_declared        = { module = "attachment_vectors", class = "BONUS_INFO" },
+  wasm_binary_attachment      = { module = "attachment_vectors", class = "CRITICAL" },
 
   cert_inline_pem             = { module = "certificate_smuggling", class = "BONUS_SOFT", bonus_module = "certificate_smuggling" },
   cert_inline_pkcs            = { module = "certificate_smuggling", class = "BONUS_SOFT", bonus_module = "certificate_smuggling" },
@@ -527,10 +535,12 @@ local NEWSLETTER_DETECTION = merge_named_config(
 )
 
 -- REASON_REGISTRY ist die zentrale Quelle fuer:
---   1. Reason -> Modul    (wird von Detector:add_module_reason() bevorzugt aufgeloest)
+--   1. Reason -> Standard-Modulzuordnung
 --   2. Reason -> Klasse   (bestimmt Score-Kategorie)
 --   3. Reason -> bonus_module (fuer BONUS_SOFT/BONUS_HARD Reasons)
 -- CFG.reason_policy darf class und bonus_module ueberschreiben, nicht module.
+-- Detector:add_module_reason() bevorzugt in r1 den aufrufenden Scanner.
+-- REASON_REGISTRY dient dort als Fallback, falls kein Modul uebergeben wurde.
 -- Neue Reasons werden damit zentral an einer Stelle gepflegt.
 local REASON_REGISTRY = merge_reason_registry(DEFAULT_REASON_REGISTRY, CFG.reason_policy)
 
@@ -862,6 +872,20 @@ local function safe_string_call(default, fn, ...)
   return tostring(res)
 end
 
+local function safe_part_method(default, obj, method_name, ...)
+  if not SAFE_PART_ACCESS then
+    local fn = obj and obj[method_name]
+    if not fn then return default end
+    return fn(obj, ...)
+  end
+
+  return safe_call(default, function()
+    local fn = obj and obj[method_name]
+    if not fn then return default end
+    return fn(obj, ...)
+  end)
+end
+
 local function decode_dbg(task, fmt, ...)
   if not (DEBUG or SCORE_DEBUG or DECODE_DEBUG) then return end
   local ok, msg = pcall(string.format, fmt, ...)
@@ -1081,20 +1105,20 @@ end
 
 local function part_get_filename_lc(part)
   if not part or not part.get_filename then return "" end
-  local name = safe_string_call("", function() return part:get_filename() end)
+  local name = safe_part_method("", part, "get_filename")
   return tostring(name or ""):lower()
 end
 
 local function part_get_type_lc(part)
   if not part or not part.get_type then return "" end
-  local ctype = safe_string_call("", function() return part:get_type() end)
+  local ctype = safe_part_method("", part, "get_type")
   return tostring(ctype or ""):lower()
 end
 
 local function part_get_content_text(part, max_bytes)
   if not part or not part.get_content then return "" end
-  local ok, c = pcall(function() return part:get_content() end)
-  if not ok or not c then return "" end
+  local c = safe_part_method(nil, part, "get_content")
+  if not c then return "" end
   local s = normalize_text(c)
   local maxb = tonumber(max_bytes) or tonumber(LSCAN.max_attachment_text) or (300 * 1024)
   if #s > maxb then s = s:sub(1, maxb) end
@@ -1368,15 +1392,24 @@ function Detector:add_reason(why)
   self.found_categories.JS_SMUGGLING = true
 end
 
--- add_module_reason loest das Zielmodul bevorzugt ueber REASON_REGISTRY auf.
--- Der uebergebene module_name dient als Fallback falls REASON_REGISTRY keinen
--- Eintrag fuer die Reason hat. Damit ist REASON_REGISTRY die verbindliche Quelle.
+-- add_module_reason bevorzugt in r1 den aufrufenden Scanner.
+-- Der uebergebene module_name bleibt damit die primaere Modulquelle.
+-- Falls kein Modul uebergeben wurde, dient REASON_REGISTRY als Fallback.
 function Detector:add_module_reason(module_name, why)
   if not why or why == "" then return end
-  local resolved_module = get_reason_module(why) or module_name
+
+  local resolved_module = module_name
+  if not resolved_module or resolved_module == "" then
+    resolved_module = get_reason_module(why)
+  end
+
   if not resolved_module then return end
   if not module_enabled(resolved_module) then return end
-  if module_info_only(resolved_module) then self:add_info(why); return end
+  if module_info_only(resolved_module) then
+    self:add_info(why)
+    return
+  end
+
   self:add_reason(why)
 end
 
@@ -1897,6 +1930,7 @@ local function part_is_likely_attachment_vector(p)
      fname:match("%.docm$") or
      fname:match("%.xlsm$") or
      fname:match("%.pptm$") or
+     fname:match("%.wasm$") or
      fname:match("%.cer$") or
      fname:match("%.crt$") or
      fname:match("%.der$") or
@@ -1910,6 +1944,7 @@ local function part_is_likely_attachment_vector(p)
 
   if ctype:find("application/pdf", 1, true) or
      ctype:find("image/svg+xml", 1, true) or
+     ctype:find("application/wasm", 1, true) or
      ctype:find("application/x%-msdownload", 1, false) or
      ctype:find("application/octet%-stream", 1, false) or
      ctype:find("application/javascript", 1, true) or
@@ -1969,10 +2004,27 @@ local function has_obfuscated_api_call(lc)
     "['\"]createobject['\"]%s*%+%s*['\"]url['\"]",
   }
   for _, p in ipairs(suspicious_concat) do if lc:find(p, 1, false) then return true end end
-  local hex_count = 0
-  for _ in lc:gmatch("x%x%x") do hex_count = hex_count + 1; if hex_count >= 3 then return true end end
-  local unicode_count = 0
-  for _ in lc:gmatch("u%x%x%x%x") do unicode_count = unicode_count + 1; if unicode_count >= 3 then return true end end
+  
+  local has_escape_context =
+    lc:find("fromcharcode", 1, true) or
+    lc:find("eval%s*%(", 1, false) or
+    lc:find("atob", 1, true) or
+    lc:find("function%s*%(", 1, false)
+
+  if has_escape_context then
+    local hex_count = 0
+    for _ in lc:gmatch("\\x%x%x") do
+      hex_count = hex_count + 1
+      if hex_count >= 3 then return true end
+    end
+
+    local unicode_count = 0
+    for _ in lc:gmatch("\\u%x%x%x%x") do
+      unicode_count = unicode_count + 1
+      if unicode_count >= 3 then return true end
+    end
+  end
+  
   if lc:find("fromcharcode%s*%(", 1, false) or lc:find("charcodeat%s*%(", 1, false) then return true end
   if lc:find("eval%s*%([^%)]+%+[^%)]+%)", 1, false) then return true end
   if lc:find("atob.call", 1, true) or lc:find("atob.apply", 1, true) then return true end
@@ -3234,12 +3286,27 @@ local function scan_attachment_vectors_module(ctx, part)
   if not module_enabled("attachment_vectors") then return end
   local fname = part_get_filename_lc(part)
   local ctype = part_get_type_lc(part)
+  local raw_head = part_get_content_text(part, 16)
   local text  = lower_limit_text(part_get_content_text(part, LSCAN.max_attachment_text), LSCAN.max_attachment_text)
-  if fname == "" and ctype == "" and text == "" then return end
+  if fname == "" and ctype == "" and text == "" and raw_head == "" then return end
   ctx.phase.attach_parts_seen = ctx.phase.attach_parts_seen + 1
 
   local mod = "attachment_vectors"
   local hit = false
+  
+  local declared_wasm =
+    fname:match("%.wasm$") or
+    ctype:find("application/wasm", 1, true)
+
+  if declared_wasm then
+    ctx:add_module_reason(mod, "wasm_binary_declared")
+  end
+
+  if raw_head ~= "" and #raw_head >= 4 and raw_head:sub(1, 4) == "\000asm" then
+    ctx:add_module_reason(mod, "wasm_binary_attachment")
+    ctx:set_critical("WASM")
+    hit = true
+  end  
 
   if fname:match("%.pdf$") or ctype:find("application/pdf", 1, true) then
     if text ~= "" then
@@ -3478,7 +3545,9 @@ local function build_reason_summary(reasons)
   end
 
   if reasons["dec_pe"] or reasons["pe_uint8array"] then add_tag("[KRITISCH:EXE]") end
-  if reasons["dec_wasm"] or reasons["wasm_uint8array"] then add_tag("[KRITISCH:WASM]") end
+  if reasons["dec_wasm"] or reasons["wasm_uint8array"] or reasons["wasm_binary_attachment"] then
+    add_tag("[KRITISCH:WASM]")
+  end
   if reasons["dec_msix"] or reasons["dec_appx"] or reasons["ms_appinstaller_uri"] or
     reasons["dec_xml_appinstaller"] or reasons["appinstaller_file"] or
     reasons["ms_appinstaller_word"] then add_tag("[APPINSTALLER]") end
@@ -3520,6 +3589,10 @@ local function build_reason_summary(reasons)
 end
 
 local function get_log_from_address(task)
+  local plain_from = safe_call(nil, function()
+    return task:get_from()
+  end)
+
   local mime_from = safe_call(nil, function()
     return task:get_from('mime')
   end)
@@ -3538,10 +3611,7 @@ local function get_log_from_address(task)
     end
 
     if type(a) == "string" then
-      if a ~= "" then
-        return a
-      end
-      return nil
+      return (a ~= "" and a) or nil
     end
 
     if type(a) ~= "table" then
@@ -3564,23 +3634,34 @@ local function get_log_from_address(task)
       return tostring(a.user) .. "@" .. tostring(a.domain)
     end
 
+    if a[1] ~= nil then
+      local nested = extract_addr(a[1])
+      if nested then
+        return nested
+      end
+
+      for _, item in ipairs(a) do
+        nested = extract_addr(item)
+        if nested then
+          return nested
+        end
+      end
+    end
+
     return nil
   end
 
   local addr = extract_addr(mime_from)
-  if addr then
-    return addr
-  end
+  if addr then return addr end
 
   addr = extract_addr(smtp_from)
-  if addr then
-    return addr
-  end
+  if addr then return addr end
+
+  addr = extract_addr(plain_from)
+  if addr then return addr end
 
   addr = extract_addr(reply_sender)
-  if addr then
-    return addr
-  end
+  if addr then return addr end
 
   return "unknown"
 end
@@ -3737,8 +3818,15 @@ local function write_result(ctx)
   local summary = build_reason_summary(ctx.reasons)
   local result_text = summary .. " Details: " .. det_s
   if info_s ~= "" then result_text = result_text .. " Info: " .. info_s end
-  if TEST_MODE then ctx.task:insert_result("HTML_SMUGGLING_TEST", ctx.final_score, "Test: " .. result_text)
-  else ctx.task:insert_result("HTML_SMUGGLING_PAYLOAD", ctx.final_score, result_text) end
+
+  apply_markers(ctx)
+
+  if TEST_MODE then
+    ctx.task:insert_result("HTML_SMUGGLING_TEST", ctx.final_score, "Test: " .. result_text)
+  else
+    ctx.task:insert_result("HTML_SMUGGLING_PAYLOAD", ctx.final_score, result_text)
+  end
+
   log_result(ctx, summary, det_s, info_s)
 end
 
@@ -3767,7 +3855,6 @@ local function detect_html_smuggling_payload(task)
     if has_any_critical_kind(ctx) then break end
   end
   finalize_score(ctx)
-  apply_markers(ctx)
   write_result(ctx)
 end
 
