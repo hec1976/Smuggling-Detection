@@ -511,7 +511,6 @@ newsletter_detection {
   classify_headers = [
     "X-HEC-MailClass",
     "X-HEC-Category",
-    "X-FortiMail-Profile"
   ];
 
   classify_keywords = [
