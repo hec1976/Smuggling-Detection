@@ -1,5 +1,5 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.4.2-r1
+-- HTML Smuggling Detection v4.4.2-r2
 --
 -- Aenderungen gegenueber v4.4.0:
 --
@@ -25,7 +25,7 @@
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.4.2-r1"
+local VERSION = "4.4.2-r2"
 
 -- =========================
 -- Config lesen
@@ -60,6 +60,7 @@ local SAFE_PART_ACCESS          = (CFG.safe_part_access ~= false)
 local LOG_CONFIG_VALIDATION     = (CFG.log_config_validation ~= false)
 local STRICT_WEIGHT_VALIDATION  = (CFG.strict_weight_validation == true)
 local DECODE_DEBUG              = (CFG.decode_debug == true)
+local ENABLE_LIGHT_BEHAVIOR_SCAN = (CFG.enable_light_behavior_scan ~= false)
 local RUNTIME_MAX_FINAL_SCORE = MAX_FINAL_SCORE
 local RUNTIME_SOFT_ONLY_CAP   = SOFT_ONLY_SCORE_CAP
 local RUNTIME_MIN_SCORE       = MIN_SCORE
@@ -227,6 +228,8 @@ local DEFAULT_NEWSLETTER_DETECTION = {
 
   html_keywords = {
     "view in browser",
+    "view online",
+    "manage preferences",
   },
 }
 
@@ -2049,11 +2052,29 @@ end
 
 local function has_canvas_qr_indicator(lc)
   if not lc or lc == "" then return false end
-  local has_canvas_surface = lc:find("<canvas", 1, true) or lc:find("document%.createelement%s*%(%s*['\"]canvas['\"]%s*%)", 1, false) or lc:find("getcontext%s*%(%s*['\"]2d['\"]%s*%)", 1, false) or lc:find("getcontext%s*%(%s*['\"]webgl['\"]%s*%)", 1, false)
+
+  local has_canvas_surface =
+    lc:find("<canvas", 1, true) or
+    lc:find("document%.createelement%s*%(%s*['\"]canvas['\"]%s*%)", 1, false) or
+    lc:find("getcontext%s*%(%s*['\"]2d['\"]%s*%)", 1, false) or
+    lc:find("getcontext%s*%(%s*['\"]webgl['\"]%s*%)", 1, false)
+
   if not has_canvas_surface then return false end
-  local has_qr_terms = lc:find("qrcanvas", 1, true) or lc:find("qrcode", 1, true) or lc:find("qr%-code", 1, false) or lc:find("qr code", 1, true)
-  local has_render_ops = lc:find("filltext%s*%(", 1, false) or lc:find("putimagedata%s*%(", 1, false) or lc:find("drawimage%s*%(", 1, false) or lc:find("todataurl%s*%(", 1, false)
-  return (has_canvas_surface and has_render_ops) or (has_canvas_surface and has_qr_terms)
+
+  local has_qr_terms =
+    lc:find("qrcanvas", 1, true) or
+    lc:find("qrcode", 1, true) or
+    lc:find("qr%-code", 1, false) or
+    lc:find("qr code", 1, true)
+
+  local has_export_ops =
+    lc:find("todataurl%s*%(", 1, false) or
+    lc:find("toblob%s*%(", 1, false) or
+    lc:find("getimagedata%s*%(", 1, false) or
+    lc:find("putimagedata%s*%(", 1, false) or
+    lc:find("drawimage%s*%(", 1, false)
+
+  return has_canvas_surface and has_qr_terms and has_export_ops
 end
 
 local function detect_inline_event_handler_exec(lc, add_fn)
@@ -2343,6 +2364,28 @@ local function scan_push_abuse_html_module(ctx, html_view)
   end
 end
 
+local function scan_push_abuse_script_module(ctx, script_raw)
+  if not module_enabled("push_abuse") then return end
+  local lc, mod = (script_raw or ""):lower(), "push_abuse"
+
+  if lc:find("notification%.requestpermission", 1, false) then
+    ctx:add_module_reason(mod, "push_permission_request")
+
+    local has_sw =
+      lc:find("serviceworker", 1, true) or
+      lc:find("navigator%.serviceworker", 1, false)
+
+    local has_push =
+      lc:find("pushmanager", 1, true) or
+      lc:find("pushsubscription", 1, true)
+
+    if has_sw or has_push then
+      ctx:add_module_reason(mod, "push_serviceworker_combo")
+      ctx:add_module_reason(mod, "push_notification_flow")
+    end
+  end
+end
+
 local function scan_certificate_html_module(ctx, html_view)
   if not module_enabled("certificate_smuggling") then return end
   local lc = html_view.scan_lc
@@ -2395,6 +2438,36 @@ end
 -- =========================
 -- Script Module Scanner
 -- =========================
+local scan_geo_targeting_module
+local scan_evasion_module
+local scan_persistence_module
+local scan_domain_rotation_module
+
+local function scan_light_behavior_modules(ctx, script_raw, meta)
+  if not ENABLE_LIGHT_BEHAVIOR_SCAN then return end
+  if not meta or not meta.is_interesting_light then return end
+
+  if meta.maybe_geo and scan_geo_targeting_module then
+    scan_geo_targeting_module(ctx, script_raw)
+  end
+
+  if meta.maybe_evasion and scan_evasion_module then
+    scan_evasion_module(ctx, script_raw)
+  end
+
+  if meta.maybe_persistence and scan_persistence_module then
+    scan_persistence_module(ctx, script_raw)
+  end
+
+  if meta.maybe_rotation and scan_domain_rotation_module then
+    scan_domain_rotation_module(ctx, script_raw)
+  end
+
+  if meta.maybe_push and scan_push_abuse_script_module then
+    scan_push_abuse_script_module(ctx, script_raw)
+  end
+end
+
 local function scan_wasm_staging_module(ctx, script_raw)
   if not module_enabled("wasm_staging") then return end
   local lc, mod = (script_raw or ""):lower(), "wasm_staging"
@@ -2514,7 +2587,7 @@ local function scan_obfuscation_script_module(ctx, script_raw, meta)
   end
 end
 
-local function scan_geo_targeting_module(ctx, script_raw)
+scan_geo_targeting_module = function(ctx, script_raw)
   if not module_enabled("geo_targeting") then return end
   local lc, mod = (script_raw or ""):lower(), "geo_targeting"
 
@@ -2531,7 +2604,17 @@ local function scan_geo_targeting_module(ctx, script_raw)
 
   local has_timezone_logic =
     lc:find("intl%.datetimeformat%(%)%.resolvedoptions%(%)%.timezone", 1, false) or
+    lc:find("resolvedoptions%(%)%.timezone", 1, false) or
     lc:find("gettimezoneoffset%s*%(", 1, false)
+
+  local has_branch =
+    lc:find("if%s*%(", 1, false) or
+    lc:find("switch%s*%(", 1, false) or
+    lc:find("===", 1, true) or
+    lc:find("!==", 1, true) or
+    lc:find("indexof%s*%(", 1, false) or
+    lc:find("includes%s*%(", 1, false) or
+    lc:find("match%s*%(", 1, false)
 
   if not (has_geo_source or has_timezone_logic) then
     return
@@ -2546,12 +2629,12 @@ local function scan_geo_targeting_module(ctx, script_raw)
     ctx:add_module_reason(mod, "geo_location_api")
   end
 
-  if has_timezone_logic then
+  if has_timezone_logic and has_branch then
     ctx:add_module_reason(mod, "timezone_targeting")
   end
 end
 
-local function scan_evasion_module(ctx, script_raw)
+scan_evasion_module = function(ctx, script_raw)
   if not module_enabled("evasion") then return end
   local lc, mod = (script_raw or ""):lower(), "evasion"
   local needs_scan = lc:find("webdriver", 1, true) or lc:find("hardwareconcurrency", 1, true) or lc:find("devicememory", 1, true) or lc:find("screen%.width", 1, false) or lc:find("mousemove", 1, true) or lc:find("addeventlistener", 1, true)
@@ -2568,16 +2651,25 @@ local function scan_evasion_module(ctx, script_raw)
   if has_user_event and has_event_hook and has_payload_logic then ctx:add_module_reason(mod, "human_interaction_required") end
 end
 
-local function scan_persistence_module(ctx, script_raw)
+scan_persistence_module = function(ctx, script_raw)
   if not module_enabled("persistence") then return end
   local lc = (script_raw or ""):lower()
   if not (lc:find("localstorage", 1, true) or lc:find("sessionstorage", 1, true)) then return end
+
   local mod = "persistence"
-  if lc:find("localstorage%.getitem", 1, false) and lc:find("localstorage%.setitem", 1, false) then ctx:add_module_reason(mod, "localstorage_persistence") end
-  if lc:find("sessionstorage", 1, true) then ctx:add_module_reason(mod, "sessionstorage_persistence") end
+
+  if lc:find("localstorage%.getitem", 1, false) and
+     lc:find("localstorage%.setitem", 1, false) then
+    ctx:add_module_reason(mod, "localstorage_persistence")
+  end
+
+  if lc:find("sessionstorage%.getitem", 1, false) and
+     lc:find("sessionstorage%.setitem", 1, false) then
+    ctx:add_module_reason(mod, "sessionstorage_persistence")
+  end
 end
 
-local function scan_domain_rotation_module(ctx, script_raw)
+scan_domain_rotation_module = function(ctx, script_raw)
   if not module_enabled("domain_rotation") then return end
   local lc, mod = (script_raw or ""):lower(), "domain_rotation"
   if not (lc:find("http://", 1, true) or lc:find("https://", 1, true) or lc:find("window%.location", 1, false) or lc:find("location%.href", 1, false)) then return end
@@ -2964,6 +3056,7 @@ end
 
 collect_script_meta = function(script_view)
   local sl = script_view.lc
+
   local maybe_b64    = sl:find("atob", 1, true) ~= nil or sl:find("base64", 1, true) ~= nil
   local maybe_concat = sl:find("%+=", 1, false) ~= nil or sl:find(".join", 1, true) ~= nil
   local maybe_obfus  = sl:find("\\x", 1, true) ~= nil or sl:find("\\u", 1, true) ~= nil or sl:find("fromcharcode", 1, true) ~= nil or sl:find("_0x", 1, true) ~= nil
@@ -2983,6 +3076,49 @@ collect_script_meta = function(script_view)
       sl:find("const%s+[%w_]+%s*=%s*%[", 1, false) ~= nil
     )
 
+  local maybe_geo =
+    sl:find("ipapi%.co", 1, false) ~= nil or
+    sl:find("ipinfo%.io", 1, false) ~= nil or
+    sl:find("geoplugin%.net", 1, false) ~= nil or
+    sl:find("cloudflare%.com/cdn%-cgi/trace", 1, false) ~= nil or
+    sl:find("navigator%.geolocation", 1, false) ~= nil or
+    sl:find("getcurrentposition", 1, true) ~= nil or
+    sl:find("resolvedoptions%(%)%.timezone", 1, false) ~= nil or
+    sl:find("gettimezoneoffset%s*%(", 1, false) ~= nil
+
+  local maybe_evasion =
+    sl:find("webdriver", 1, true) ~= nil or
+    sl:find("hardwareconcurrency", 1, true) ~= nil or
+    sl:find("devicememory", 1, true) ~= nil or
+    sl:find("mousemove", 1, true) ~= nil or
+    sl:find("keydown", 1, true) ~= nil or
+    sl:find("pointermove", 1, true) ~= nil
+
+  local maybe_persistence =
+    sl:find("localstorage", 1, true) ~= nil or
+    sl:find("sessionstorage", 1, true) ~= nil
+
+  local maybe_rotation =
+    sl:find("window%.location", 1, false) ~= nil or
+    sl:find("location%.href", 1, false) ~= nil or
+    sl:find("location%.assign%s*%(", 1, false) ~= nil or
+    sl:find("location%.replace%s*%(", 1, false) ~= nil or
+    sl:find("window%.open%s*%(", 1, false) ~= nil
+
+  local maybe_push =
+    sl:find("notification%.requestpermission", 1, false) ~= nil or
+    sl:find("pushmanager", 1, true) ~= nil or
+    sl:find("pushsubscription", 1, true) ~= nil or
+    sl:find("serviceworker", 1, true) ~= nil
+
+  local is_interesting_light =
+    maybe_geo or maybe_evasion or maybe_persistence or maybe_rotation or maybe_push
+
+  local is_interesting =
+    maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or
+    maybe_wasm or maybe_web3 or maybe_css or maybe_rc4 or maybe_array_join or
+    is_interesting_light
+
   return {
     maybe_b64 = maybe_b64,
     maybe_concat = maybe_concat,
@@ -2994,7 +3130,15 @@ collect_script_meta = function(script_view)
     maybe_css = maybe_css,
     maybe_rc4 = maybe_rc4,
     maybe_array_join = maybe_array_join,
-    is_interesting = (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or maybe_wasm or maybe_web3 or maybe_css or maybe_rc4 or maybe_array_join),
+
+    maybe_geo = maybe_geo,
+    maybe_evasion = maybe_evasion,
+    maybe_persistence = maybe_persistence,
+    maybe_rotation = maybe_rotation,
+    maybe_push = maybe_push,
+    is_interesting_light = is_interesting_light,
+
+    is_interesting = is_interesting,
     allow_decode_path = (maybe_b64 or maybe_concat or maybe_obfus or maybe_array_join),
   }
 end
@@ -3205,6 +3349,7 @@ end
 local function score_script_interest(entry)
   if not entry.is_inline or #entry.body < (THRESHOLDS.script_min_len or 20) then return 0 end
   local lc, score = entry.lc_body, 0
+
   if lc:find("atob%s*%(", 1, false) then score = score + 4 end
   if lc:find("createobjecturl", 1, true) then score = score + 4 end
   if lc:find("uint8array", 1, true) then score = score + 3 end
@@ -3217,6 +3362,44 @@ local function score_script_interest(entry)
   if lc:find("%+=", 1, false) then score = score + 1 end
   if has_long_base64_sequence(lc, 100) then score = score + 3 end
   if lc:find("%.join%s*%(", 1, false) and lc:find("%[", 1, false) then score = score + 2 end
+
+  if lc:find("ipapi%.co", 1, false) or
+     lc:find("ipinfo%.io", 1, false) or
+     lc:find("geoplugin%.net", 1, false) or
+     lc:find("navigator%.geolocation", 1, false) or
+     lc:find("resolvedoptions%(%)%.timezone", 1, false) or
+     lc:find("gettimezoneoffset%s*%(", 1, false) then
+    score = score + 1
+  end
+
+  if lc:find("webdriver", 1, true) or
+     lc:find("hardwareconcurrency", 1, true) or
+     lc:find("devicememory", 1, true) or
+     lc:find("mousemove", 1, true) or
+     lc:find("keydown", 1, true) or
+     lc:find("pointermove", 1, true) then
+    score = score + 1
+  end
+
+  if lc:find("localstorage", 1, true) or
+     lc:find("sessionstorage", 1, true) then
+    score = score + 1
+  end
+
+  if lc:find("window%.location", 1, false) or
+     lc:find("location%.href", 1, false) or
+     lc:find("location%.assign%s*%(", 1, false) or
+     lc:find("location%.replace%s*%(", 1, false) or
+     lc:find("window%.open%s*%(", 1, false) then
+    score = score + 1
+  end
+
+  if lc:find("notification%.requestpermission", 1, false) or
+     lc:find("pushmanager", 1, true) or
+     lc:find("serviceworker", 1, true) then
+    score = score + 1
+  end
+
   return score
 end
 
@@ -3242,15 +3425,33 @@ local function is_script_budget_exceeded(ctx, script_loop_start)
   return false
 end
 
-local function analyze_script_block(ctx, html_view, entry)
+local function analyze_script_block(ctx, html_view, entry, allow_deep)
   local script = entry.body or ""
   if #script < (THRESHOLDS.script_min_len or 20) then return end
+
   local script_view = build_script_views(script)
   local meta = collect_script_meta(script_view)
-  if not meta.is_interesting then return end
-  ctx.total_script_scanned = ctx.total_script_scanned + math.min(#script_view.raw, (tonumber(LSCRIPT.smart_chunk) or 20000) * 2)
+
+  if meta.is_interesting_light then
+    scan_light_behavior_modules(ctx, script_view.raw, meta)
+  end
+
+  if not allow_deep then
+    return
+  end
+
+  if not meta.is_interesting then
+    return
+  end
+
+  ctx.total_script_scanned = ctx.total_script_scanned + math.min(
+    #script_view.raw,
+    (tonumber(LSCRIPT.smart_chunk) or 20000) * 2
+  )
+
   scan_uint8array_module(ctx, script_view.raw, meta)
   if has_any_critical_kind(ctx) then return end
+
   scan_obfuscation_script_module(ctx, script_view.raw, meta)
   scan_geo_targeting_module(ctx, script_view.raw)
   scan_evasion_module(ctx, script_view.raw)
@@ -3260,25 +3461,48 @@ local function analyze_script_block(ctx, html_view, entry)
   scan_blockchain_staging_module(ctx, script_view.raw)
   scan_css_code_exec_module(ctx, html_view, script_view, meta)
   scan_certificate_script_module(ctx, script_view.raw)
-  if meta.maybe_rc4 then scan_rc4_module(ctx, script_view.raw) end
+
+  if meta.maybe_rc4 then
+    scan_rc4_module(ctx, script_view.raw)
+  end
+
   if has_any_critical_kind(ctx) then return end
+
   scan_decoded_payload_module(ctx, script_view.raw, meta)
 end
 
 scan_script_blocks = function(ctx, html_view, script_entries)
-  if not ctx.deep_scan or not Policy.should_deep_scan_scripts(ctx, html_view) then return end
+  local allow_deep = ctx.deep_scan and Policy.should_deep_scan_scripts(ctx, html_view)
+  local allow_light = ENABLE_LIGHT_BEHAVIOR_SCAN
+
+  if not allow_deep and not allow_light then
+    return
+  end
+
   local selected = select_top_script_entries(script_entries, LSCRIPT.max_check or 3)
   local script_loop_start = rspamd_util.get_time()
+
   for _, entry in ipairs(selected) do
     ctx.phase.script_blocks_seen = ctx.phase.script_blocks_seen + 1
-    if is_script_budget_exceeded(ctx, script_loop_start) then break end
-    local ok_script, err = pcall(function() analyze_script_block(ctx, html_view, entry); ctx.phase.script_blocks_scanned = ctx.phase.script_blocks_scanned + 1 end)
+
+    if is_script_budget_exceeded(ctx, script_loop_start) then
+      break
+    end
+
+    local ok_script, err = pcall(function()
+      analyze_script_block(ctx, html_view, entry, allow_deep)
+      ctx.phase.script_blocks_scanned = ctx.phase.script_blocks_scanned + 1
+    end)
+
     if not ok_script then
       local emsg = tostring(err or "unknown")
       ctx:add_error("analyze_script_block failed: " .. emsg)
       rspamd_logger.errx(ctx.task, "HTML_SMUGGLING_SCRIPT_ERROR || " .. emsg)
     end
-    if has_any_critical_kind(ctx) then break end
+
+    if has_any_critical_kind(ctx) then
+      break
+    end
   end
 end
 
@@ -3400,6 +3624,75 @@ end
 -- =========================
 -- HTML Orchestration
 -- =========================
+local function scan_image_smuggling_info_html_module(ctx, html_view)
+  if not module_enabled("image_smuggling_info") then return end
+
+  local mod = "image_smuggling_info"
+  local raw = (html_view and html_view.raw_lc) or ""
+  if raw == "" then return end
+
+  local seen = {}
+
+  local function handle_src(src)
+    src = trim((src or ""):lower())
+    if src == "" or seen[src] then return end
+    seen[src] = true
+
+    if src:match("%.png%.[a-z0-9]+$") or
+       src:match("%.jpg%.[a-z0-9]+$") or
+       src:match("%.jpeg%.[a-z0-9]+$") or
+       src:match("%.gif%.[a-z0-9]+$") or
+       src:match("%.svg%.[a-z0-9]+$") or
+       src:match("%.webp%.[a-z0-9]+$") then
+      ctx:add_module_reason(mod, "image_double_ext")
+    end
+
+    if src:find("invoice", 1, true) and src:find("payload", 1, true) then
+      ctx:add_module_reason(mod, "image_polyglot_name")
+    end
+  end
+
+  for src in raw:gmatch('<img[^>]+src%s*=%s*"([^"]+)"') do
+    handle_src(src)
+  end
+
+  for src in raw:gmatch("<img[^>]+src%s*=%s*'([^']+)'") do
+    handle_src(src)
+  end
+end
+
+local function scan_embedded_svg_data_uris(ctx, raw_html)
+  if not raw_html or raw_html == "" then return end
+
+  local seen = {}
+  local hits = 0
+  local max_hits = 3
+  
+  for b64 in raw_html:gmatch("[Dd][Aa][Tt][Aa]:[Ii][Mm][Aa][Gg][Ee]/[Ss][Vv][Gg]%+[Xx][Mm][Ll];[Bb][Aa][Ss][Ee]64,([A-Za-z0-9%+/_=-]+)") do
+    local nb = normalize_b64(b64)
+
+    if nb ~= "" and not seen[nb] then
+      seen[nb] = true
+      hits = hits + 1
+      if hits > max_hits then break end
+
+      local decoded = safe_decode_base64(ctx.task, nb, LSCAN.max_attachment_text)
+      if decoded and decoded ~= "" then
+        local dl = decoded:lower()
+
+        if dl:find("<svg", 1, true) then
+          -- SVG spezifische Marker
+          analyze_decoded_blob(ctx, decoded)
+
+          -- Inneres Script / Smuggling im SVG ebenfalls tief scannen
+          scan_decoded_html_blob(ctx, decoded)
+        end
+      end
+    end
+  end
+end
+
+
 local function scan_html_part(ctx, part)
   ctx.phase.html_parts_seen = ctx.phase.html_parts_seen + 1
 
@@ -3460,6 +3753,11 @@ local function scan_html_part(ctx, part)
         ctx.heur_mul = compute_heur_mul(ctx.task, ctx.newsletter, ctx.newsletter_reason)
       end
     end
+
+    scan_image_smuggling_info_html_module(ctx, html_view)
+
+    -- eingebettete SVG Data URIs vor dem Basic Gate analysieren
+    scan_embedded_svg_data_uris(ctx, raw_html)
 
     if not Policy.has_basic_js_gate(html_view.raw_lc) then
       if html_view.raw_lc:find("begin certificate", 1, true) or
