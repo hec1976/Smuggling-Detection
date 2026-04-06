@@ -873,17 +873,20 @@ local function safe_string_call(default, fn, ...)
 end
 
 local function safe_part_method(default, obj, method_name, ...)
+  -- Wir holen uns die Funktion vom Objekt (z.B. part["get_content"])
+  local fn = obj and obj[method_name]
+  
+  -- Wenn das Objekt oder die Methode nicht existiert, sofort Default zurückgeben
+  if not fn then return default end
+
+  -- Falls wir im "Unsicher"-Modus sind, direkt aufrufen
   if not SAFE_PART_ACCESS then
-    local fn = obj and obj[method_name]
-    if not fn then return default end
     return fn(obj, ...)
   end
 
-  return safe_call(default, function()
-    local fn = obj and obj[method_name]
-    if not fn then return default end
-    return fn(obj, ...)
-  end)
+  -- Im Sicherheitsmodus nutzen wir safe_call. 
+  -- safe_call ruft pcall(fn, obj, ...) auf. Das ist absolut stabil.
+  return safe_call(default, fn, obj, ...)
 end
 
 local function decode_dbg(task, fmt, ...)
@@ -3419,12 +3422,12 @@ local function scan_html_part(ctx, part)
   end
   
   if raw_html == "" then
-  raw_html = part_get_content_text(part, LSCAN.max_bytes)
+    raw_html = part_get_content_text(part, LSCAN.max_bytes)
   end
   
   if raw_html == "" then
-  ctx:add_error("html part content unavailable")
-  return
+    ctx:add_error("html part content unavailable")
+    return
   end
 
   local ok_scan, err = pcall(function()
