@@ -83,7 +83,7 @@ local LIMITS = {
     min_decode_total = 400,
     big_threshold    = 5000,
     huge_threshold   = 20000,
-    join_max_parts   = 5,
+    join_max_parts   = 15,
     join_max_len     = 180000,
   },
   decode = {
@@ -185,7 +185,7 @@ local DEFAULT_MODULES = {
   push_abuse   = { enabled = true, info_only = true,  weight_override = nil },
   link_analysis        = { enabled = false, info_only = true,  weight_override = nil },
   wasm_binary_analysis = { enabled = false, info_only = false, weight_override = nil },
-  rc4_detection        = { enabled = false, info_only = false, weight_override = nil },
+  rc4_detection        = { enabled = true, info_only = false, weight_override = nil },
 }
 
 local DEFAULT_NEWSLETTER_DETECTION = {
@@ -329,6 +329,7 @@ local DEFAULT_REASON_REGISTRY = {
   dec_vhdx             = { module = "decoded_payload",   class = "CONTAINER" },
   dec_ole              = { module = "decoded_payload",   class = "CONTAINER" },
   dec_script           = { module = "decoded_payload",   class = "SCRIPT_HARD" },
+  dec_js_dropper       = { module = "decoded_payload",   class = "SCRIPT_HARD" },
 
   uint8array_payload   = { module = "uint8array",        class = "JS_SMUGGLING" },
   large_uint8array     = { module = "uint8array",        class = "JS_SMUGGLING" },
@@ -1315,6 +1316,8 @@ function Detector.new(task)
   self.deep_scan = true
   self.decode_depth = 0
   self.max_decode_depth = 2
+  self.svg_data_uri_depth = 0
+  self.max_svg_data_uri_depth = 2
   self.total_script_scanned = 0
   self.started_at = rspamd_util.get_time()
   self.phase = {
@@ -1466,11 +1469,28 @@ function Policy.has_smuggling_context(ctx)
 end
 
 function Policy.has_strong_decode_gate(ctx)
-  return ctx:has_reason("atob") or ctx:has_reason("atob_obfuscated") or
-         ctx:has_reason("obfus_api") or ctx:has_reason("split_payload") or
-         ctx:has_reason("delayed_execution") or ctx:has_reason("ms_appinstaller_uri") or
-         ctx:has_reason("appinstaller_file") or ctx:has_reason("uint8array_payload") or
-         ctx:has_reason("wasm_inline_stage")
+  local classic_gate =
+    ctx:has_reason("atob") or
+    ctx:has_reason("atob_obfuscated") or
+    ctx:has_reason("obfus_api") or
+    ctx:has_reason("split_payload") or
+    ctx:has_reason("delayed_execution") or
+    ctx:has_reason("ms_appinstaller_uri") or
+    ctx:has_reason("appinstaller_file") or
+    ctx:has_reason("uint8array_payload") or
+    ctx:has_reason("wasm_inline_stage")
+
+  local fetch_delivery_gate =
+    ctx:has_reason("fetch") and (
+      ctx:has_reason("blob") or
+      ctx:has_reason("createObjectURL") or
+      ctx:has_reason("data_uri")
+    )
+
+  local packaging_gate =
+    ctx:has_reason("blob") and ctx:has_reason("createObjectURL")
+
+  return classic_gate or fetch_delivery_gate or packaging_gate
 end
 
 function Policy.should_scan_css(ctx)
@@ -1619,6 +1639,43 @@ local function advanced_deobfuscate(script, timeout_ms)
     end
   end
 
+  for name, val in script:gmatch('([%w_]+)%s*%+=%s*"([^"]*)"') do
+    add_ops = add_ops + 1
+    if timed_out(add_ops) then return clean, virtuals, 1 end
+    if var_cnt >= (LSCRIPT.max_vars or 20) then break end
+    name = trim(name)
+    val = (val or ""):gsub("%s+", "")
+    if is_frag_base64ish(val) then
+      if not var_map[name] then
+        if var_cnt >= (LSCRIPT.max_vars or 20) then break end
+        var_cnt = var_cnt + 1
+        var_map[name] = ""
+      end
+      var_map[name] = (var_map[name] or "") .. val
+      maybe_add_virtual(var_map[name])
+    end
+  end
+
+  local add_var_ops = 0
+  for name, ref in script:gmatch("([%w_]+)%s*%+=%s*([%w_]+)") do
+    add_var_ops = add_var_ops + 1
+    if timed_out(add_var_ops) then return clean, virtuals, 1 end
+
+    name = trim(name)
+    ref = trim(ref)
+
+    local ref_val = var_map[ref]
+    if ref_val and is_frag_base64ish(ref_val) then
+      if not var_map[name] then
+        if var_cnt >= (LSCRIPT.max_vars or 20) then break end
+        var_cnt = var_cnt + 1
+        var_map[name] = ""
+      end
+      var_map[name] = (var_map[name] or "") .. ref_val
+      maybe_add_virtual(var_map[name])
+    end
+  end
+
   local MAX_JOIN_ARRAY_PARTS = 20
   local MAX_JOIN_TOTAL_LEN   = tonumber(LB64.join_max_len) or 180000
 
@@ -1743,7 +1800,9 @@ local function advanced_deobfuscate(script, timeout_ms)
         if var_map[target] or var_cnt < (LSCRIPT.max_vars or 20) then
           local resolved = nil
           if expr:find("%+", 1, false) then resolved = try_resolve_concat(expr) end
-          if (not resolved) and expr:find("%.join", 1, true) then resolved = try_resolve_join(expr) end
+          if (not resolved) and expr:find("%]%.join%s*%(", 1, false) then
+            resolved = try_resolve_join(expr)
+          end
           if resolved and resolved ~= var_map[target] then
             if not var_map[target] then var_cnt = var_cnt + 1 end
             var_map[target] = resolved
@@ -1829,8 +1888,16 @@ local function sniff_decoded(bin)
     if l:find("<appinstaller", 1, true) then return "XML_APPINSTALLER" end
     if l:find("<?xml", 1, true) then return "XML" end
     if l:find("<svg", 1, true) then return "SVG" end
+
+    if l:find("<hta:", 1, true) or
+       l:find("hta:application", 1, true) or
+       l:find("showintaskbar", 1, true) or
+       l:find("singleinstance", 1, true) or
+       l:find("applicationname", 1, true) then
+      return "HTA"
+    end
+
     if l:find("<html", 1, true) or l:find("<script", 1, true) then return "HTML" end
-    if l:find("<hta:", 1, true) or l:find("application%s*=") or l:find("showintaskbar", 1, true) then return "HTA" end
     local vbs_ind = 0
     if l:find("wscript.createobject", 1, true) then vbs_ind = vbs_ind + 1 end
     if l:find("on error resume next", 1, true) then vbs_ind = vbs_ind + 1 end
@@ -1973,6 +2040,49 @@ end
 
 local function has_any_critical_kind(ctx)
   return ctx.critical_kind ~= nil and ctx.critical_kind ~= ""
+end
+
+local function has_decoded_js_dropper_context(ctx)
+  local has_decode_chain =
+    ctx:has_reason("atob") or
+    ctx:has_reason("atob_obfuscated") or
+    ctx:has_reason("split_payload") or
+    ctx:has_reason("b64_joined_parts") or
+    ctx:has_reason("virtual_b64_candidates") or
+    ctx:has_reason("delayed_execution") or
+    ctx:has_reason("timeout_b64_smuggling") or
+    ctx:has_reason("timeout_b64_decode") or
+    ctx:has_reason("timeout_b64") or
+    ctx:has_reason("uint8array_payload")
+
+  local has_packaging_sink =
+    (ctx:has_reason("blob") and ctx:has_reason("createObjectURL")) or
+    ctx:has_reason("data_uri") or
+    ctx:has_reason("iframe_src")
+
+  local has_attachment_context =
+    ctx:has_reason("att_html_attachment") or
+    ctx:has_reason("att_svg_smuggling_context")
+
+  local has_remote_stage_context =
+    ctx:has_reason("fetch") and (
+      ctx:has_reason("blob") or
+      ctx:has_reason("createObjectURL") or
+      ctx:has_reason("data_uri") or
+      ctx:has_reason("iframe_src")
+    )
+
+  return has_decode_chain and (
+    has_packaging_sink or
+    (has_attachment_context and (
+      ctx:has_reason("blob") or
+      ctx:has_reason("createObjectURL") or
+      ctx:has_reason("data_uri") or
+      ctx:has_reason("iframe_src") or
+      ctx:has_reason("fetch")
+    )) or
+    has_remote_stage_context
+  )
 end
 
 -- =========================
@@ -2272,6 +2382,15 @@ local function scan_js_smuggling_html_module(ctx, html_view)
   end
 
   if lc:find("src%s*=", 1, false) and lc:find("data:", 1, true) then
+    ctx:add_module_reason(mod, "data_uri")
+  end
+
+  if lc:find("data:", 1, true) and (
+       lc:find("fetch%s*%(", 1, false) or
+       lc:find("blob%s*%(", 1, false) or
+       lc:find("createobjecturl", 1, true) or
+       lc:find("atob%s*%(", 1, false)
+     ) then
     ctx:add_module_reason(mod, "data_uri")
   end
 
@@ -2692,17 +2811,53 @@ end
 
 local function scan_rc4_module(ctx, script_raw)
   if not module_enabled("rc4_detection") then return end
+
   local lc, mod = (script_raw or ""):lower(), "rc4_detection"
-  local has_ksa = (lc:find("s%[i%]%s*=%s*s%[j%]", 1, false) ~= nil and lc:find("s%[j%]%s*=%s*s%[i%]", 1, false) ~= nil) or (lc:find("ksa", 1, true) ~= nil)
-  local has_prga = (lc:find("prga", 1, true) ~= nil) or (lc:find("s%[i%]", 1, false) ~= nil and lc:find("s%[j%]", 1, false) ~= nil and lc:find("charcodeat", 1, true) ~= nil)
-  local has_xor = (lc:find("charcodeat%s*%(%)%s*%^", 1, false) ~= nil) or (lc:find("%^%s*s%[", 1, false) ~= nil)
-  local has_decrypt = (lc:find("decrypt%s*%(", 1, false) ~= nil) or (lc:find("rc4%s*%(", 1, false) ~= nil)
-  local has_key = has_quoted_hex_key_material(lc, 8) or (lc:find("key%s*=%s*['\"]", 1, false) ~= nil)
+
+  local has_ksa =
+    (lc:find("s%[i%]%s*=%s*s%[j%]", 1, false) ~= nil and
+     lc:find("s%[j%]%s*=%s*s%[i%]", 1, false) ~= nil) or
+    (lc:find("ksa", 1, true) ~= nil)
+
+  local has_prga =
+    (lc:find("prga", 1, true) ~= nil) or
+    (lc:find("s%[i%]", 1, false) ~= nil and
+     lc:find("s%[j%]", 1, false) ~= nil and
+     lc:find("charcodeat", 1, true) ~= nil)
+
+  local has_xor =
+    (lc:find("charcodeat%s*%(", 1, false) ~= nil and lc:find("%^", 1, false) ~= nil) or
+    (lc:find("%^%s*s%[", 1, false) ~= nil)
+
+  local has_decrypt =
+    (lc:find("decrypt%s*%(", 1, false) ~= nil) or
+    (lc:find("rc4%s*%(", 1, false) ~= nil)
+
+  local has_key =
+    has_quoted_hex_key_material(lc, 8) or
+    (lc:find("key%s*=%s*['\"]", 1, false) ~= nil)
+
+  local signal_count = 0
+  if has_ksa then signal_count = signal_count + 1 end
+  if has_prga then signal_count = signal_count + 1 end
+  if has_xor then signal_count = signal_count + 1 end
+  if has_decrypt then signal_count = signal_count + 1 end
+  if has_key then signal_count = signal_count + 1 end
+
+  local has_strong_rc4_shape =
+    (has_ksa and has_prga) or
+    (has_xor and has_key and (has_ksa or has_prga)) or
+    (has_decrypt and has_key and (has_ksa or has_prga or has_xor))
+
+  if signal_count < 3 or not has_strong_rc4_shape then
+    return
+  end
+
   if has_ksa then ctx:add_module_reason(mod, "rc4_ksa_pattern") end
   if has_prga then ctx:add_module_reason(mod, "rc4_prga_pattern") end
   if has_xor then ctx:add_module_reason(mod, "rc4_xor_loop") end
   if has_decrypt then ctx:add_module_reason(mod, "rc4_decrypt_call") end
-  if has_key and (has_ksa or has_prga or has_decrypt) then ctx:add_module_reason(mod, "rc4_key_material") end
+  if has_key then ctx:add_module_reason(mod, "rc4_key_material") end
 end
 
 local function scan_wasm_binary_module(ctx, decoded_bin)
@@ -2718,30 +2873,96 @@ local function byte_clamp(n)
   return n
 end
 
+local function has_uint8array_delivery_context(ctx)
+  return ctx:has_reason("blob") or
+         ctx:has_reason("createObjectURL") or
+         ctx:has_reason("fetch") or
+         ctx:has_reason("data_uri") or
+         ctx:has_reason("iframe_src") or
+         ctx:has_reason("att_html_attachment") or
+         ctx:has_reason("att_svg_smuggling_context")
+end
+
 local function scan_uint8array_module(ctx, script_raw, meta)
   if not module_enabled("uint8array") or not meta.maybe_uint8 then return end
+
   local ok = pcall(function()
     local lc, mod = (script_raw or ""):lower(), "uint8array"
     local patterns = {
-      "uint8array%s*%(%s*%[%s*([%d%s,]+)",
-      "uint8array%.from%s*%(%s*%[%s*([%d%s,]+)",
+      "uint8array%s*%(%s*%[%s*([^%]]+)",
+      "uint8array%.from%s*%(%s*%[%s*([^%]]+)",
     }
+
     local found = false
+    local large_min = tonumber(THRESHOLDS.uint8array_large_min) or 1024
+    local min_header_bytes = 16
+    local maxb = tonumber(LOBFUS.max_uint8array_bytes) or 2048
+
     for _, array_pattern in ipairs(patterns) do
       if found then break end
+
       for array_content in lc:gmatch(array_pattern) do
         local byte_values, byte_count = {}, 0
-        local maxb = tonumber(LOBFUS.max_uint8array_bytes) or 2048
-        for num_str in array_content:gmatch("%d+") do
-          byte_count = byte_count + 1
-          if byte_count <= maxb then byte_values[#byte_values + 1] = tonumber(num_str) or 0 end
-          if byte_count > maxb then break end
+
+        for token in array_content:gmatch("([^,%]]+)") do
+          local t = trim(token)
+          local n = nil
+
+          local hx = t:match("^0x([0-9a-fA-F]+)$")
+          if hx then
+            n = tonumber(hx, 16)
+          else
+            n = tonumber(t)
+          end
+
+          if n ~= nil then
+            byte_count = byte_count + 1
+            if byte_count <= maxb then
+              byte_values[#byte_values + 1] = n
+            end
+            if byte_count > maxb then break end
+          end
         end
-        if byte_count > (THRESHOLDS.uint8array_large_min or 1024) then
+
+        local header_bytes = {}
+        for i = 1, math.min(16, #byte_values) do
+          header_bytes[#header_bytes + 1] = string.char(byte_clamp(byte_values[i]))
+        end
+        local header = table.concat(header_bytes)
+
+        local is_large = byte_count > large_min
+        local has_delivery = has_uint8array_delivery_context(ctx)
+        local matched_header = false
+
+        if byte_count >= min_header_bytes and has_delivery and #header >= 4 then
+          if header:sub(1, 4) == "\000asm" then
+            ctx:add_module_reason(mod, "uint8array_payload")
+            ctx:set_critical("WASM")
+            ctx:add_module_reason(mod, "wasm_uint8array")
+            matched_header = true
+
+          elseif header:sub(1, 2) == "MZ" then
+            ctx:add_module_reason(mod, "uint8array_payload")
+            ctx:set_critical("PE")
+            ctx:add_module_reason(mod, "pe_uint8array")
+            matched_header = true
+
+          elseif header:sub(1, 4) == "PK\003\004" then
+            ctx:add_module_reason(mod, "uint8array_payload")
+            ctx:set_payload_kind("ZIP")
+            ctx:add_module_reason(mod, "zip_uint8array")
+            matched_header = true
+
+          elseif #header >= 5 and header:sub(1, 5) == "%PDF-" then
+            ctx:add_module_reason(mod, "uint8array_payload")
+            ctx:add_module_reason(mod, "pdf_uint8array")
+            matched_header = true
+          end
+        end
+
+        if is_large and not matched_header then
           ctx:add_module_reason(mod, "uint8array_payload")
-          local header_bytes = {}
-          for i = 1, math.min(16, #byte_values) do header_bytes[#header_bytes + 1] = string.char(byte_clamp(byte_values[i])) end
-          local header = table.concat(header_bytes)
+
           if #header >= 4 then
             if header:sub(1, 4) == "\000asm" then
               ctx:set_critical("WASM")
@@ -2752,7 +2973,7 @@ local function scan_uint8array_module(ctx, script_raw, meta)
             elseif header:sub(1, 4) == "PK\003\004" then
               ctx:set_payload_kind("ZIP")
               ctx:add_module_reason(mod, "zip_uint8array")
-            elseif header:sub(1, 5) == "%PDF-" then
+            elseif #header >= 5 and header:sub(1, 5) == "%PDF-" then
               ctx:add_module_reason(mod, "pdf_uint8array")
             else
               ctx:add_module_reason(mod, "large_uint8array")
@@ -2760,13 +2981,19 @@ local function scan_uint8array_module(ctx, script_raw, meta)
           else
             ctx:add_module_reason(mod, "large_uint8array")
           end
+        end
+
+        if matched_header or is_large then
           found = true
           break
         end
       end
     end
   end)
-  if not ok then ctx:add_error("scan_uint8array_module failed") end
+
+  if not ok then
+    ctx:add_error("scan_uint8array_module failed")
+  end
 end
 
 local function scan_certificate_script_module(ctx, script_raw)
@@ -2791,6 +3018,8 @@ local collect_script_meta
 local scan_script_blocks
 local scan_decoded_payload_module
 local analyze_decoded_blob
+local scan_image_smuggling_info_html_module
+local scan_embedded_svg_data_uris
 
 local function scan_decoded_html_blob(ctx, decoded_html)
   local raw_html = clamp_html_size(normalize_text(decoded_html))
@@ -2799,6 +3028,9 @@ local function scan_decoded_html_blob(ctx, decoded_html)
   scan_appinstaller_module(ctx, raw_html)
 
   local html_view = build_html_views(raw_html)
+
+  scan_image_smuggling_info_html_module(ctx, html_view)
+  scan_embedded_svg_data_uris(ctx, raw_html)
 
   if not Policy.has_basic_js_gate(html_view.raw_lc) then
     if html_view.raw_lc:find("begin certificate", 1, true) or
@@ -2825,6 +3057,10 @@ local function scan_decoded_script_blob(ctx, decoded_script)
 
   if not meta.is_interesting then
     return
+  end
+
+  if meta.maybe_push and scan_push_abuse_script_module then
+    scan_push_abuse_script_module(ctx, script_view.raw)
   end
 
   scan_uint8array_module(ctx, script_view.raw, meta)
@@ -3026,6 +3262,11 @@ analyze_decoded_blob = function(ctx, decoded)
   if kind == "JS" then
     ctx:add_module_reason("js_smuggling", "dec_js")
 
+    if has_decoded_js_dropper_context(ctx) then
+      ctx:add_module_reason("decoded_payload", "dec_js_dropper")
+      ctx:set_payload_kind("SCRIPT")
+    end
+
     if ctx.decode_depth >= ctx.max_decode_depth then
       ctx:add_info("decode_depth_limit")
       return
@@ -3065,7 +3306,20 @@ collect_script_meta = function(script_view)
   local maybe_wasm   = has_wasm_api_indicator(sl)
   local maybe_web3   = sl:find("ethers", 1, true) ~= nil or sl:find("web3", 1, true) ~= nil or sl:find("ethereum", 1, true) ~= nil
   local maybe_css    = sl:find("getcomputedstyle", 1, true) ~= nil
-  local maybe_rc4    = sl:find("rc4", 1, true) ~= nil or sl:find("ksa", 1, true) ~= nil or sl:find("prga", 1, true) ~= nil or (sl:find("decrypt", 1, true) ~= nil and sl:find("key", 1, true) ~= nil)
+  local maybe_rc4 =
+    (
+      sl:find("rc4", 1, true) ~= nil or
+      sl:find("ksa", 1, true) ~= nil or
+      sl:find("prga", 1, true) ~= nil
+    )
+    and
+    (
+      sl:find("charcodeat", 1, true) ~= nil or
+      sl:find("%^", 1, false) ~= nil or
+      sl:find("s%[i%]", 1, false) ~= nil or
+      sl:find("s%[j%]", 1, false) ~= nil or
+      sl:find("key", 1, true) ~= nil
+    )
 
   local maybe_array_join =
     (sl:find("%.join%s*%(", 1, false) ~= nil) and
@@ -3287,6 +3541,7 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
 
         if has_any_critical_kind(ctx) or
            ctx:has_reason("dec_script") or
+           ctx:has_reason("dec_js_dropper") or
            ctx:has_reason("dec_lnk") or
            ctx:has_reason("dec_iso") or
            ctx:has_reason("dec_msix") or
@@ -3312,7 +3567,8 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
      ctx:has_reason("dec_cab") or
      ctx:has_reason("dec_vhdx") or
      ctx:has_reason("dec_ole") or
-     ctx:has_reason("dec_script") then
+     ctx:has_reason("dec_script") or
+     ctx:has_reason("dec_js_dropper") then
     ctx.reasons["dec_bin"] = nil
   end
 end
@@ -3624,7 +3880,7 @@ end
 -- =========================
 -- HTML Orchestration
 -- =========================
-local function scan_image_smuggling_info_html_module(ctx, html_view)
+scan_image_smuggling_info_html_module = function(ctx, html_view)
   if not module_enabled("image_smuggling_info") then return end
 
   local mod = "image_smuggling_info"
@@ -3661,34 +3917,49 @@ local function scan_image_smuggling_info_html_module(ctx, html_view)
   end
 end
 
-local function scan_embedded_svg_data_uris(ctx, raw_html)
+scan_embedded_svg_data_uris = function(ctx, raw_html)
   if not raw_html or raw_html == "" then return end
 
-  local seen = {}
-  local hits = 0
-  local max_hits = 3
-  
-  for b64 in raw_html:gmatch("[Dd][Aa][Tt][Aa]:[Ii][Mm][Aa][Gg][Ee]/[Ss][Vv][Gg]%+[Xx][Mm][Ll];[Bb][Aa][Ss][Ee]64,([A-Za-z0-9%+/_=-]+)") do
-    local nb = normalize_b64(b64)
+  if (ctx.svg_data_uri_depth or 0) >= (ctx.max_svg_data_uri_depth or 2) then
+    ctx:add_info("decode_depth_limit")
+    return
+  end
 
-    if nb ~= "" and not seen[nb] then
-      seen[nb] = true
-      hits = hits + 1
-      if hits > max_hits then break end
+  ctx.svg_data_uri_depth = (ctx.svg_data_uri_depth or 0) + 1
 
-      local decoded = safe_decode_base64(ctx.task, nb, LSCAN.max_attachment_text)
-      if decoded and decoded ~= "" then
-        local dl = decoded:lower()
+  local ok, err = pcall(function()
+    local seen = {}
+    local hits = 0
+    local max_hits = 3
+    
+    for b64 in raw_html:gmatch("[Dd][Aa][Tt][Aa]:[Ii][Mm][Aa][Gg][Ee]/[Ss][Vv][Gg]%+[Xx][Mm][Ll];[Bb][Aa][Ss][Ee]64,([A-Za-z0-9%+/_=-]+)") do
+      local nb = normalize_b64(b64)
 
-        if dl:find("<svg", 1, true) then
-          -- SVG spezifische Marker
-          analyze_decoded_blob(ctx, decoded)
+      if nb ~= "" and not seen[nb] then
+        seen[nb] = true
+        hits = hits + 1
+        if hits > max_hits then break end
 
-          -- Inneres Script / Smuggling im SVG ebenfalls tief scannen
-          scan_decoded_html_blob(ctx, decoded)
+        local decoded = safe_decode_base64(ctx.task, nb, LSCAN.max_attachment_text)
+        if decoded and decoded ~= "" then
+          local dl = decoded:lower()
+
+          if dl:find("<svg", 1, true) then
+            -- SVG spezifische Marker
+            analyze_decoded_blob(ctx, decoded)
+
+            -- Inneres Script / Smuggling im SVG ebenfalls tief scannen
+            scan_decoded_html_blob(ctx, decoded)
+          end
         end
       end
     end
+  end)
+
+  ctx.svg_data_uri_depth = math.max(0, (ctx.svg_data_uri_depth or 1) - 1)
+
+  if not ok then
+    ctx:add_error("scan_embedded_svg_data_uris failed: " .. tostring(err))
   end
 end
 
@@ -3856,7 +4127,7 @@ local function build_reason_summary(reasons)
      reasons["dec_ole"] or reasons["dec_cab"] or reasons["dec_7zip"] or reasons["dec_rar"] or
      reasons["att_chm_attachment"] or reasons["att_onenote_attachment"] or
      reasons["att_office_macro_container"] or reasons["att_lnk_attachment"] then add_tag("[CONTAINER]") end
-  if reasons["dec_script"] or reasons["dec_js"] or reasons["dec_html"] or
+  if reasons["dec_script"] or reasons["dec_js_dropper"] or reasons["dec_js"] or reasons["dec_html"] or
      reasons["att_hta_attachment"] or reasons["att_script_attachment"] then add_tag("[SCRIPT_PAYLOAD]") end
   if reasons["atob_obfuscated"] or reasons["obfus_api"] or reasons["polymorphic_obfuscation"] or
      reasons["hex_array"] or reasons["fromcharcode_api"] or reasons["array_join_concat"] then add_tag("[VERSCHLEIERT]") end
@@ -3877,8 +4148,10 @@ local function build_reason_summary(reasons)
   if reasons["wasm_staged_payload"] or reasons["wasm_fetch_stage"] then add_tag("[WASM_STAGING]") end
   if reasons["blockchain_staged_payload"] or reasons["web3_api_usage"] then add_tag("[BLOCKCHAIN_STAGE]") end
   if reasons["css_code_execution"] or reasons["css_computedstyle_exec"] then add_tag("[CSS_CODE_EXEC]") end
+  if reasons["rc4_ksa_pattern"] or reasons["rc4_prga_pattern"] or reasons["rc4_xor_loop"] or
+     reasons["rc4_decrypt_call"] or reasons["rc4_key_material"] then add_tag("[RC4_DECRYPT]") end
   if reasons["att_pdf_javascript"] or reasons["att_pdf_openaction"] or reasons["att_pdf_launch"] or
-     reasons["att_pdf_embeddedfile"] or reasons["att_pdf_richmedia"] then add_tag("[PDF_ACTIVE]") end
+     reasons["att_pdf_embeddedfile"] or reasons["att_pdf_richmedia"] then add_tag("[PDF_ACTIVE]") end	  
   if reasons["att_svg_script"] or reasons["att_svg_event_handler"] or reasons["att_svg_foreignobject"] or
      reasons["att_svg_xlink_href"] or reasons["att_svg_data_uri"] then add_tag("[SVG_ACTIVE]") end
   if reasons["cert_inline_pem"] or reasons["cert_inline_pkcs"] or reasons["cert_data_uri"] or
