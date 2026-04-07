@@ -1,128 +1,197 @@
-# HTML Smuggling & Attachment Vector Detection Configuration
-# Optimized for Version 4.3.7+
-# Location: /etc/rspamd/local.d/html_smuggling.conf
+# /etc/rspamd/local.d/html_smuggling.conf
+# HTML Smuggling Detection v4.4.2-r2
+# Produktionsprofil mit Fokus auf stabile Erkennung, wenig Score-Bloat und weniger Newsletter-FPs
 
 html_smuggling {
-    # ========================================
-    # 1. CORE SCORING (Globale Limits)
-    # ========================================
-    max_final_score = 12.0;
-    soft_only_cap = 4.0;      # Deckelt den Score, wenn nur JS/Heuristiken ohne harten Payload gefunden wurden
-    min_score = 0.5;          # Mindest-Score bei Funden
-    critical_boost = 0.0;     # Nicht nötig, da CRITICAL-Gewichte bereits hoch sind
+    enabled = true;
+    test_mode = false;
 
     # ========================================
-    # 2. NEWSLETTER KONTROLLE (Dämpfung)
+    # 1. CORE SCORING
     # ========================================
-    heur_mul_newsletter_header = 0.4;
-    heur_mul_newsletter_heuristic = 0.5;
-    heur_mul_trusted_newsletter = 0.15;
-    
-    # Pfade zu den Maps (Dateien müssen existieren, können aber leer sein)
+    max_final_score = 15.0;
+    soft_only_cap = 4.5;
+    min_score = 0.0;
+    critical_boost = 0.0;
+
+    # ========================================
+    # 2. NEWSLETTER KONTROLLE
+    # ========================================
+    heur_mul_default = 1.0;
+    heur_mul_newsletter_header = 0.3;
+    heur_mul_newsletter_heuristic = 0.4;
+    heur_mul_trusted_newsletter = 0.1;
+
     trusted_newsletter_domains_map = "/etc/rspamd/local.d/maps.d/trusted_nl.map";
     safe_script_domains_map = "/etc/rspamd/local.d/maps.d/smuggling_safe.map";
     unsafe_script_domains_map = "/etc/rspamd/local.d/maps.d/smuggling_unsafe.map";
-    
-    deep_scan_newsletter_header = true;
+
+    # Für produktive Umgebungen meist besser:
+    # Header-Newsletters ohne Trust-Map nicht unnötig tief scannen
+    deep_scan_newsletter_header = false;
 
     # ========================================
-    # 3. GEWICHTE (Basiswerte für die Klassen)
+    # 3. GEWICHTE
     # ========================================
     weights {
         JS_SMUGGLING       = 1.2;
         OBFUSCATION        = 2.5;
         SUSPICIOUS_API     = 0.8;
         EVASION_LOGIC      = 1.5;
-        CONTAINER          = 6.5;
-        SCRIPT_HARD        = 7.5;
-        CRITICAL           = 13.0;
+        CONTAINER          = 6.0;
+        SCRIPT_HARD        = 7.0;
+        CRITICAL           = 12.0;
+
+        COMBO_JS_OBFUS     = 1.5;
+        COMBO_HARD_OBFUS   = 2.0;
+        COMBO_JS_API       = 0.8;
+        COMBO_JS_EVASION   = 0.7;
+
         EXTERNAL_SCRIPT    = 1.0;
         CSS_EXFIL          = 2.0;
-        CLICKFIX_LURE      = 1.5;
+        GEO_TARGETING      = 0.8;
+        ROTATION_BONUS     = 1.0;
+        CLICKFIX_LURE      = 1.2;
         WASM_STAGING       = 1.4;
         BLOCKCHAIN_STAGING = 1.2;
+        CSS_CODE_EXEC      = 1.5;
         ATTACHMENT_VECTOR  = 1.4;
         CERT_SMUGGLING     = 1.1;
-        ROTATION_BONUS     = 0.8;
-        GEO_TARGETING      = 0.6;
+        IMAGE_SMUGGLING    = 0.7;
     }
 
     # ========================================
-    # 4. MODULE KONTROLLE (Kompakt-Ansicht)
+    # 4. MODULE KONTROLLE
     # ========================================
     modules {
-        # --- Kern-Module ---
+        appinstaller { enabled = true; info_only = false; }
         js_smuggling { enabled = true; info_only = false; }
         obfuscation { enabled = true; info_only = false; }
         decoded_payload { enabled = true; info_only = false; }
         uint8array { enabled = true; info_only = false; }
-        appinstaller { enabled = true; info_only = false; }
 
-        # --- Angriffs-Vektoren ---
-        attachment_vectors { enabled = true; info_only = false; }
+        external_scripts { enabled = true; info_only = false; }
+        css_exfil { enabled = true; info_only = false; }
+        geo_targeting { enabled = true; info_only = false; }
+        evasion { enabled = true; info_only = false; }
+        persistence { enabled = true; info_only = false; }
+        domain_rotation { enabled = true; info_only = false; }
         clickfix { enabled = true; info_only = false; }
         wasm_staging { enabled = true; info_only = false; }
         blockchain_staging { enabled = true; info_only = false; }
         css_code_execution { enabled = true; info_only = false; }
+
+        attachment_vectors { enabled = true; info_only = false; }
         certificate_smuggling { enabled = true; info_only = false; }
-        external_scripts { enabled = true; info_only = false; }
 
-        # --- Verhaltens-Analysen ---
-        evasion { enabled = true; info_only = false; }
-        geo_targeting { enabled = true; info_only = false; }
-        persistence { enabled = true; info_only = false; }
-        domain_rotation { enabled = true; info_only = false; }
-        css_exfil { enabled = true; info_only = false; }
-
-        # --- Spezial-Analysen & Info-Module ---
-        push_abuse { enabled = true; info_only = true; }
         image_smuggling_info { enabled = true; info_only = true; }
-        wasm_binary_analysis { enabled = true; info_only = false; }
-        rc4_detection { enabled = false; }
+        push_abuse { enabled = true; info_only = true; }
+
+        # Im aktuellen Stand besser deaktiviert
         link_analysis { enabled = false; info_only = true; }
+        wasm_binary_analysis { enabled = false; info_only = false; }
+        rc4_detection { enabled = false; info_only = false; }
     }
 
     # ========================================
-    # 5. PERFORMANCE LIMITS
+    # 5. LIMITS
     # ========================================
     limits {
         scan {
-            max_bytes = 250 * 1024;
-            smart_chunk = 60 * 1024;
-            max_attachment_text = 300 * 1024;
+            max_bytes = 204800;
+            smart_chunk = 51200;
+            long_html_b64_threshold = 1200;
+            max_attachment_text = 307200;
         }
-        script {
-            max_script_time_ms = 80.0;
-            max_total_script_scan = 150 * 1024;
-            max_check = 3;
-            max_external = 5;
-        }
+
         b64 {
             min_len = 200;
             max_candidates = 6;
-            min_decode_total = 1500;
+            max_scan_bytes = 512000;
+            min_decode_total = 400;
+            big_threshold = 5000;
+            huge_threshold = 20000;
+            join_max_parts = 5;
+            join_max_len = 180000;
+        }
+
+        decode {
+            max_bytes = 163840;
+            joined_len_mul = 2;
+        }
+
+        script {
+            max_check = 3;
+            max_external = 5;
+            max_vars = 20;
+            smart_chunk = 20000;
+            max_script_len = 80000;
+            max_total_script_scan = 120000;
+            max_script_time_ms = 80.0;
+            deobfus_timeout_ms = 50.0;
+            split_payload_min_vars = 6;
+        }
+
+        obfus {
+            min_frag_len = 4;
+            virtual_trigger_len = 120;
+            virtual_max_payloads = 3;
+            resolve_passes = 8;
+            max_uint8array_bytes = 2048;
+            max_entropy_check_bytes = 4096;
+            css_max_style_size = 10000;
+            max_delayed_exec_context = 500;
         }
     }
 
     # ========================================
-    # 6. LOGGING & DEBUG
+    # 6. THRESHOLDS
+    # ========================================
+    thresholds {
+        entropy_high = 4.5;
+        entropy_very_high = 5.0;
+        hex_var_low = 2;
+        hex_var_high = 5;
+        array_storage_low = 1;
+        array_storage_high = 3;
+        uint8array_large_min = 1024;
+        deobfus_reduce_len_1 = 20000;
+        deobfus_reduce_len_2 = 40000;
+        b64_extract_loop_budget_ms = 25.0;
+        script_min_len = 20;
+        normalized_script_min_len = 40;
+        delayed_exec_context = 500;
+    }
+
+    # ========================================
+    # 7. LOGGING
     # ========================================
     debug = false;
     score_debug = false;
-    log_score_threshold = 6.0;
-    slow_log_ms = 200.0;
+    decode_debug = false;
+    enable_phase_debug = false;
+
+    log_score_threshold = 5.0;
+    log_simple_line = false;
+
     force_extended_log = true;
-    force_extended_log_min_score = 6.0;
+    force_extended_log_min_score = 5.0;
+    slow_log_ms = 150.0;
+
+    max_external_reported = 3;
     redact_log_fields = true;
     log_config_validation = true;
 
     # ========================================
-    # 7. SICHERHEIT & INTERNALS
+    # 8. SICHERHEIT / INTERNALS
     # ========================================
     require_script_context_for_external = true;
     require_strong_gate_for_decode = true;
+
     safe_task_access = true;
     safe_part_access = true;
+
     hard_fail_on_bad_config = false;
-    strict_weight_validation = false;
+    strict_weight_validation = true;
+    enable_light_behavior_scan = true;
 }
