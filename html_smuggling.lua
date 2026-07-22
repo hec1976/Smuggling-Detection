@@ -1,5 +1,5 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.4.0
+-- HTML Smuggling Detection v4.5.0
 --
 -- Refactor und Erweiterungen seit v4.3.5:
 --
@@ -42,17 +42,28 @@
 -- 37. scan_decoded_payload_module bindet min_decode_total einmalig lokal und nutzt den Wert konsistent fuer Debug und Stop-Gate
 -- 38. Decode-Logging und kleine Runtime-Cleanups wurden vereinheitlicht, ohne die bestehende Detection-Logik zu aendern
 -- 39. Version und Description auf v4.4.0 aktualisiert
+-- 40. PowerShell IEX-Erkennung auf gueltige Lua-Frontier-Patterns korrigiert
+-- 41. Base64 Magic-Prefix Fast-Path fuer kleine PE, ZIP, PDF, WASM, CAB, RAR, 7ZIP, OLE, LNK und CHM Payloads
+-- 42. Base64-Kandidaten werden gesammelt, bewertet und erst danach priorisiert
+-- 43. Uint8Array erkennt dezimale und hexadezimale Bytefolgen sowie Array-Variablen
+-- 44. Escape-, FromCharCode-, Percent-, Hex-Array- und Blob-Deobfuskation liefert rohe Payload-Kandidaten
+-- 45. Rekursive Base64-Erkennung fuer druckbare Zwischenstufen und Decode-Tiefe standardmaessig 3
+-- 46. Zusaetzliche Magic-Erkennung fuer GZIP, BZIP2, XZ, ZSTD und TAR
+-- 47. Attachment-Inhaltspruefung mit Magic-/Dateiendungs-Abgleich
+-- 48. Image-Tail-Carving fuer PNG, JPEG, GIF und WebP
+-- 49. Script-Auswahl priorisiert Magic-Prefix-Payloads und prueft standardmaessig bis zu 5 Scripts
+-- 50. ZIP-Dateinamen werden auf ausfuehrbare oder scriptbasierte Inhalte geprueft
 
 -- Design:
 -- Die Struktur bleibt nah an v4.3.6d.
 -- HTML bleibt der Hauptpfad.
 -- Neue Attachment- und Zertifikats-Scanner ergaenzen den bestehenden Flow.
 -- Image Smuggling bleibt standardmaessig info_only.
--- v4.4.0 fokussiert auf saubere Runtime-Steuerung, konsistentere Decode-Gates und weniger Log-Flooding.
+-- v4.5.0 erweitert die Payload-Rekonstruktion und Inhaltsklassifizierung bei weiterhin begrenzten Laufzeitbudgets.
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.4.0"
+local VERSION = "4.5.0"
 
 -- =========================
 -- Config lesen
@@ -101,11 +112,15 @@ local LIMITS = {
     smart_chunk             = 50 * 1024,
     long_html_b64_threshold = 1200,
     max_attachment_text     = 300 * 1024,
+    max_attachment_magic    = 2 * 1024 * 1024,
+    image_tail_max          = 256 * 1024,
   },
   b64 = {
-    min_len          = 200,
-    max_candidates   = 6,
-    max_scan_bytes   = 500 * 1024,
+    min_len             = 200,
+    magic_min_len       = 40,
+    max_candidates      = 6,
+    max_pool_candidates = 32,
+    max_scan_bytes      = 500 * 1024,
     min_decode_total = 400,
     big_threshold    = 5000,
     huge_threshold   = 20000,
@@ -113,11 +128,13 @@ local LIMITS = {
     join_max_len     = 180000,
   },
   decode = {
-    max_bytes      = 160 * 1024,
-    joined_len_mul = 2,
+    max_bytes             = 160 * 1024,
+    joined_len_mul        = 2,
+    max_depth             = 3,
+    nested_max_candidates = 3,
   },
   script = {
-    max_check              = 3,
+    max_check              = 5,
     max_external           = 5,
     max_vars               = 20,
     smart_chunk            = 20000,
@@ -242,6 +259,8 @@ local REASON_MODULE_MAP = {
   b64_total_len_huge      = "js_smuggling",
   b64_joined_parts        = "js_smuggling",
   virtual_b64_candidates  = "js_smuggling",
+  b64_magic_prefix       = "js_smuggling",
+  nested_base64_payload  = "decoded_payload",
   array_index_atob        = "js_smuggling",
   array_index_blob        = "js_smuggling",
   array_index_fetch       = "js_smuggling",
@@ -277,6 +296,11 @@ local REASON_MODULE_MAP = {
   array_string_storage    = "obfuscation",
   array_storage           = "obfuscation",
   func_obfuscation        = "obfuscation",
+  escaped_string_payload = "obfuscation",
+  fromcharcode_payload   = "obfuscation",
+  percent_encoded_payload = "obfuscation",
+  hex_array_payload      = "obfuscation",
+  blob_concat_payload    = "obfuscation",
 
   dec_pe               = "decoded_payload",
   dec_wasm             = "decoded_payload",
@@ -290,6 +314,8 @@ local REASON_MODULE_MAP = {
   dec_cab              = "decoded_payload",
   dec_vhdx             = "decoded_payload",
   dec_ole              = "decoded_payload",
+  dec_compressed       = "decoded_payload",
+  zip_executable_member = "decoded_payload",
   dec_script           = "decoded_payload",
 
   uint8array_payload   = "uint8array",
@@ -373,6 +399,8 @@ local REASON_MODULE_MAP = {
   att_script_attachment       = "attachment_vectors",
   att_html_attachment         = "attachment_vectors",
   att_svg_smuggling_context   = "attachment_vectors",
+  attachment_magic_mismatch  = "attachment_vectors",
+  image_appended_payload     = "attachment_vectors",
 
   cert_inline_pem             = "certificate_smuggling",
   cert_inline_pkcs            = "certificate_smuggling",
@@ -410,9 +438,13 @@ local DEFAULT_REASON_POLICY = {
   dec_cab              = { class = "CONTAINER" },
   dec_vhdx             = { class = "CONTAINER" },
   dec_ole              = { class = "CONTAINER" },
+  dec_compressed       = { class = "CONTAINER" },
+  attachment_magic_mismatch = { class = "CONTAINER" },
+  image_appended_payload    = { class = "CONTAINER" },
   zip_uint8array       = { class = "CONTAINER" },
 
   dec_script           = { class = "SCRIPT_HARD" },
+  zip_executable_member = { class = "SCRIPT_HARD" },
   att_hta_attachment   = { class = "SCRIPT_HARD" },
   att_script_attachment = { class = "SCRIPT_HARD" },
 
@@ -444,6 +476,11 @@ local DEFAULT_REASON_POLICY = {
   rc4_xor_loop            = { class = "OBFUSCATION" },
   rc4_decrypt_call        = { class = "OBFUSCATION" },
   rc4_key_material        = { class = "OBFUSCATION" },
+  escaped_string_payload   = { class = "OBFUSCATION" },
+  fromcharcode_payload     = { class = "OBFUSCATION" },
+  percent_encoded_payload  = { class = "OBFUSCATION" },
+  hex_array_payload        = { class = "OBFUSCATION" },
+  blob_concat_payload      = { class = "OBFUSCATION" },
 
   webcrypto_api              = { class = "SUSPICIOUS_API" },
   serviceworker_api          = { class = "SUSPICIOUS_API" },
@@ -500,6 +537,8 @@ local DEFAULT_REASON_POLICY = {
   b64_total_len_huge      = { class = "JS_SMUGGLING" },
   b64_joined_parts        = { class = "JS_SMUGGLING" },
   virtual_b64_candidates  = { class = "JS_SMUGGLING" },
+  b64_magic_prefix       = { class = "JS_SMUGGLING" },
+  nested_base64_payload  = { class = "JS_SMUGGLING" },
   array_index_atob        = { class = "JS_SMUGGLING" },
   array_index_blob        = { class = "JS_SMUGGLING" },
   array_index_fetch       = { class = "JS_SMUGGLING" },
@@ -876,6 +915,43 @@ local function normalize_b64(s)
   return t
 end
 
+local BASE64_MAGIC_PREFIXES = {
+  { prefix = "0M8R4KGxGuE", kind = "OLE" },
+  { prefix = "UmFyIRoH",    kind = "RAR" },
+  { prefix = "N3q8rycc",    kind = "7ZIP" },
+  { prefix = "JVBERi0",     kind = "PDF" },
+  { prefix = "AGFzbQ",      kind = "WASM" },
+  { prefix = "TVNDRg",      kind = "CAB" },
+  { prefix = "dmhkeGZpbGU", kind = "VHDX" },
+  { prefix = "SVRTRg",      kind = "CHM" },
+  { prefix = "TAAAAA",      kind = "LNK" },
+  { prefix = "TVqQ",        kind = "PE" },
+  { prefix = "UEsDB",       kind = "ZIP" },
+  { prefix = "UEsFB",       kind = "ZIP" },
+  { prefix = "UEsBA",       kind = "ZIP" },
+}
+
+local function base64_magic_hint(s)
+  if not s then return nil end
+  local t = normalize_b64(s)
+  for _, item in ipairs(BASE64_MAGIC_PREFIXES) do
+    if t:sub(1, #item.prefix) == item.prefix then return item.kind end
+  end
+  return nil
+end
+
+local function is_mostly_printable(s, ratio)
+  if not s or #s == 0 then return false end
+  ratio = tonumber(ratio) or 0.85
+  local maxb = math.min(#s, 8192)
+  local printable = 0
+  for i = 1, maxb do
+    local b = s:byte(i)
+    if b == 9 or b == 10 or b == 13 or (b >= 32 and b <= 126) then printable = printable + 1 end
+  end
+  return (printable / maxb) >= ratio
+end
+
 local function is_frag_base64ish(s)
   if not s then return false end
   if #s < (LOBFUS.min_frag_len or 4) then return false end
@@ -1178,7 +1254,7 @@ function Detector.new(task)
   self.heur_mul = 1.0
   self.deep_scan = true
   self.decode_depth = 0
-  self.max_decode_depth = 2
+  self.max_decode_depth = tonumber(LDEC.max_depth) or 3
   self.total_script_scanned = 0
   self.started_at = rspamd_util.get_time()
   self.phase = {
@@ -1291,6 +1367,9 @@ function Policy.has_basic_js_gate(raw_lc)
   if raw_lc:find("settimeout%s*%(", 1, false) then return true end
   if raw_lc:find("setinterval%s*%(", 1, false) then return true end
   if raw_lc:find("fromcharcode%s*%(", 1, false) then return true end
+  if raw_lc:find("decodeuricomponent%s*%(", 1, false) or raw_lc:find("unescape%s*%(", 1, false) then return true end
+  if raw_lc:find("\\x%x%x", 1, false) or raw_lc:find("\\u00%x%x", 1, false) then return true end
+  if raw_lc:find("new%s+blob%s*%(%s*%[", 1, false) then return true end
   if raw_lc:find("on%w+%s*=", 1, false) then return true end
   if raw_lc:find("webassembly%.instantiate", 1, false) then return true end
   if raw_lc:find("webassembly%.instantiatestreaming", 1, false) then return true end
@@ -1320,6 +1399,10 @@ function Policy.has_strong_decode_gate(ctx)
          ctx:has_reason("obfus_api") or ctx:has_reason("split_payload") or
          ctx:has_reason("delayed_execution") or ctx:has_reason("ms_appinstaller_uri") or
          ctx:has_reason("appinstaller_file") or ctx:has_reason("uint8array_payload") or
+         ctx:has_reason("blob") or ctx:has_reason("createObjectURL") or
+         ctx:has_reason("b64_magic_prefix") or ctx:has_reason("fromcharcode_payload") or
+         ctx:has_reason("escaped_string_payload") or ctx:has_reason("percent_encoded_payload") or
+         ctx:has_reason("hex_array_payload") or ctx:has_reason("blob_concat_payload") or
          ctx:has_reason("wasm_inline_stage")
 end
 
@@ -1363,33 +1446,72 @@ end
 -- =========================
 -- Base64 Candidates
 -- =========================
+local function candidate_context_score(text, start_pos, end_pos)
+  local from = math.max(1, (start_pos or 1) - 180)
+  local to = math.min(#text, (end_pos or start_pos or 1) + 180)
+  local ctx = text:sub(from, to):lower()
+  local score = 0
+  if ctx:find("atob", 1, true) then score = score + 8 end
+  if ctx:find("createobjecturl", 1, true) then score = score + 8 end
+  if ctx:find("blob", 1, true) then score = score + 6 end
+  if ctx:find("uint8array", 1, true) then score = score + 5 end
+  if ctx:find("fetch", 1, true) then score = score + 3 end
+  if ctx:find("eval", 1, true) or ctx:find("function", 1, true) then score = score + 2 end
+  return score
+end
+
 local function extract_b64_candidates(text, max_candidates_override)
-  local candidates, seen = {}, {}
-  if not text or #text < (LB64.min_len or 200) then return candidates end
+  local candidates, pool, seen = {}, {}, {}
+  local magic_min = tonumber(LB64.magic_min_len) or 40
+  if not text or #text < magic_min then return candidates end
   local max_in = tonumber(LB64.max_scan_bytes) or (LSCAN.max_bytes * 2)
   if #text > max_in then text = text:sub(1, max_in) end
   local max_cand = tonumber(max_candidates_override) or (LB64.max_candidates or 6)
+  local max_pool = math.max(max_cand, tonumber(LB64.max_pool_candidates) or 32)
   local min_len  = tonumber(LB64.min_len) or 200
   local start_time = rspamd_util.get_time()
   local budget_ms  = tonumber(THRESHOLDS.b64_extract_loop_budget_ms) or 25.0
   local iter_count = 0
-  for raw in text:gmatch("[A-Za-z0-9%+/_=-]+") do
+
+  for start_pos, raw, end_pos in text:gmatch("()([A-Za-z0-9%+/_=-]+)()") do
     iter_count = iter_count + 1
     if (iter_count % 80 == 0) and (elapsed_ms(start_time) > budget_ms) then break end
-    if #candidates >= max_cand then break end
-    if #raw >= min_len and not looks_like_tracking_or_inline_b64(raw) then
+    local magic_kind = base64_magic_hint(raw)
+    local eligible = (#raw >= min_len) or (magic_kind and #raw >= magic_min)
+    if eligible and not looks_like_tracking_or_inline_b64(raw) then
       local nb = normalize_b64(raw)
-      if #nb >= min_len and nb:match("^[A-Za-z0-9%+/_=-]+$") then
-        local q = base64_quality_score(nb)
-        if q >= 3 then
-		  if not seen[nb] then
-			seen[nb] = true
-			candidates[#candidates + 1] = nb
-		  end
+      if #nb >= magic_min and nb:match("^[A-Za-z0-9%+/_=-]+$") and not seen[nb] then
+        local quality = base64_quality_score(nb)
+        if magic_kind or quality >= 3 then
+          local score = quality + candidate_context_score(text, start_pos, end_pos)
+          if magic_kind then score = score + 100 end
+          if #nb >= 20000 then score = score + 8
+          elseif #nb >= 5000 then score = score + 5
+          elseif #nb >= 1000 then score = score + 2 end
+          seen[nb] = true
+          local item = { value = nb, score = score, len = #nb, magic = magic_kind }
+          if #pool < max_pool then
+            pool[#pool + 1] = item
+          else
+            local min_i = 1
+            for j = 2, #pool do
+              if pool[j].score < pool[min_i].score or
+                 (pool[j].score == pool[min_i].score and pool[j].len < pool[min_i].len) then min_i = j end
+            end
+            if item.score > pool[min_i].score or
+               (item.score == pool[min_i].score and item.len > pool[min_i].len) then pool[min_i] = item end
+          end
         end
       end
     end
   end
+
+  table.sort(pool, function(a, b)
+    if a.score == b.score then return a.len > b.len end
+    return a.score > b.score
+  end)
+
+  for i = 1, math.min(max_cand, #pool) do candidates[#candidates + 1] = pool[i].value end
   return candidates
 end
 
@@ -1408,28 +1530,68 @@ local function advanced_deobfuscate(script, timeout_ms)
     if (op_cnt % 10) ~= 0 then return false end
     return elapsed_ms(t0) > budget
   end
-  local clean, var_map, var_cnt, virtuals = script, {}, 0, {}
+  local clean, var_map, raw_var_map, var_cnt, virtuals, raw_virtuals = script, {}, {}, 0, {}, {}
 
   -- FIX v4.3.7b: Separater Zaehler fuer Join-Kandidaten damit
   -- virtual_max_payloads diese nicht verdraengt
   local join_virtuals_added = 0
   local MAX_JOIN_VIRTUALS = 3
 
+  local function virtual_score(val)
+    local score = #val
+    if base64_magic_hint(val) then score = score + 1000000 end
+    return score
+  end
+
   local function maybe_add_virtual(val)
     if not val then return end
-    if #virtuals >= (LOBFUS.virtual_max_payloads or 3) then return end
-    if #val >= (LOBFUS.virtual_trigger_len or 120) then virtuals[#virtuals + 1] = val end
+    local is_magic = base64_magic_hint(val) ~= nil
+    if #val < (LOBFUS.virtual_trigger_len or 120) and not (is_magic and #val >= (LB64.magic_min_len or 40)) then return end
+    for _, existing in ipairs(virtuals) do if existing == val then return end end
+    local maxv = tonumber(LOBFUS.virtual_max_payloads) or 3
+    if #virtuals < maxv then virtuals[#virtuals + 1] = val; return end
+    local min_i = 1
+    for i = 2, #virtuals do if virtual_score(virtuals[i]) < virtual_score(virtuals[min_i]) then min_i = i end end
+    if virtual_score(val) > virtual_score(virtuals[min_i]) then virtuals[min_i] = val end
+  end
+
+  local function raw_virtual_score(val, reason)
+    local score = math.min(#val, 10000) / 100
+    local p4 = val:sub(1, 8)
+    if p4:sub(1, 2) == "MZ" or p4:sub(1, 4) == "\000asm" then score = score + 1000
+    elseif p4:sub(1, 4) == "PK\003\004" or p4:sub(1, 5) == "%PDF-" or p4:sub(1, 4) == "MSCF" or
+           p4:sub(1, 4) == "ITSF" or p4:sub(1, 6) == "Rar!\x1A\x07" then score = score + 800 end
+    local lc = val:sub(1, 4096):lower()
+    if lc:find("powershell", 1, true) or lc:find("wscript", 1, true) or lc:find("<hta:", 1, true) or
+       lc:find("<script", 1, true) or lc:find("atob", 1, true) or lc:find("eval", 1, true) then score = score + 400 end
+    if reason == "fromcharcode_payload" or reason == "hex_array_payload" or reason == "blob_concat_payload" then score = score + 20 end
+    return score
+  end
+
+  local function maybe_add_raw_virtual(val, reason)
+    if not val or #val < 4 then return end
+    local maxb = tonumber(LDEC.max_bytes) or (160 * 1024)
+    if #val > maxb then val = val:sub(1, maxb) end
+    for _, item in ipairs(raw_virtuals) do if item.data == val then return end end
+    local item = { data = val, reason = reason or "escaped_string_payload" }
+    item.score = raw_virtual_score(item.data, item.reason)
+    local maxv = math.max(6, tonumber(LOBFUS.virtual_max_payloads) or 3)
+    if #raw_virtuals < maxv then raw_virtuals[#raw_virtuals + 1] = item; return end
+    local min_i = 1
+    for i = 2, #raw_virtuals do if raw_virtuals[i].score < raw_virtuals[min_i].score then min_i = i end end
+    if item.score > raw_virtuals[min_i].score then raw_virtuals[min_i] = item end
   end
 
   -- FIX v4.3.7b: Join-Kandidat mit eigenem Limit und ohne virtual_trigger_len Check
   local function add_join_virtual(val)
-    if not val or #val < (LB64.min_len or 200) then return end
+    if not val then return end
+    local min_join_len = base64_magic_hint(val) and (LB64.magic_min_len or 40) or (LB64.min_len or 200)
+    if #val < min_join_len then return end
     if join_virtuals_added >= MAX_JOIN_VIRTUALS then return end
-	for _, v in ipairs(virtuals) do
-	  if v == val then return end
-	end
-    virtuals[#virtuals + 1] = val
-    join_virtuals_added = join_virtuals_added + 1
+    local before = table.concat(virtuals, "\000")
+    maybe_add_virtual(val)
+    local after = table.concat(virtuals, "\000")
+    if before ~= after then join_virtuals_added = join_virtuals_added + 1 end
   end
 
   local function remember_var(name, val)
@@ -1446,12 +1608,12 @@ local function advanced_deobfuscate(script, timeout_ms)
   for _, kw in ipairs({"const", "let", "var"}) do
     for name, val in script:gmatch(kw .. "%s+([%w_]+)%s*=%s*'([^']*)'") do
       decl_ops = decl_ops + 1
-      if timed_out(decl_ops) then return clean, virtuals, 1 end
+      if timed_out(decl_ops) then return clean, virtuals, 1, raw_virtuals end
       remember_var(name, val)
     end
     for name, val in script:gmatch(kw .. '%s+([%w_]+)%s*=%s*"([^"]*)"') do
       decl_ops = decl_ops + 1
-      if timed_out(decl_ops) then return clean, virtuals, 1 end
+      if timed_out(decl_ops) then return clean, virtuals, 1, raw_virtuals end
       remember_var(name, val)
     end
   end
@@ -1460,7 +1622,7 @@ local function advanced_deobfuscate(script, timeout_ms)
   local add_ops = 0
   for name, val in script:gmatch("([%w_]+)%s*%+=%s*'([^']*)'") do
     add_ops = add_ops + 1
-    if timed_out(add_ops) then return clean, virtuals, 1 end
+    if timed_out(add_ops) then return clean, virtuals, 1, raw_virtuals end
     if var_cnt >= (LSCRIPT.max_vars or 20) then break end
     name = trim(name)
     val = (val or ""):gsub("%s+", "")
@@ -1601,6 +1763,116 @@ local function advanced_deobfuscate(script, timeout_ms)
     return nil
   end
 
+  local function decode_js_escapes(value)
+    local changed = false
+    local out = value:gsub("\\x(%x%x)", function(h)
+      changed = true
+      return string.char(tonumber(h, 16) or 0)
+    end)
+    out = out:gsub("\\u00(%x%x)", function(h)
+      changed = true
+      return string.char(tonumber(h, 16) or 0)
+    end)
+    return changed and out or nil
+  end
+
+  local function decode_percent_bytes(value)
+    local changed = false
+    local out = value:gsub("%%(%x%x)", function(h)
+      changed = true
+      return string.char(tonumber(h, 16) or 0)
+    end)
+    return changed and out or nil
+  end
+
+  local function remember_raw_var(name, value)
+    if not name or not value or #name > 64 then return end
+    if raw_var_map[name] then return end
+    local decoded = decode_js_escapes(value) or decode_percent_bytes(value) or value
+    local maxb = tonumber(LDEC.max_bytes) or (160 * 1024)
+    if #decoded > maxb then decoded = decoded:sub(1, maxb) end
+    raw_var_map[name] = decoded
+  end
+
+  for _, kw in ipairs({"const", "let", "var"}) do
+    for name, value in script:gmatch(kw .. "%s+([%w_]+)%s*=%s*'([^']*)'") do remember_raw_var(name, value) end
+    for name, value in script:gmatch(kw .. '%s+([%w_]+)%s*=%s*"([^"]*)"') do remember_raw_var(name, value) end
+  end
+
+  local function add_reconstructed(value, reason)
+    if not value or value == "" then return end
+    local compact = value:gsub("%s+", "")
+    if #compact >= (LB64.magic_min_len or 40) and is_frag_base64ish(compact) then
+      maybe_add_virtual(compact)
+    else
+      maybe_add_raw_virtual(value, reason)
+    end
+  end
+
+  local reconstruct_ops = 0
+  local function inspect_quoted(value)
+    reconstruct_ops = reconstruct_ops + 1
+    if timed_out(reconstruct_ops) then return false end
+    local decoded = decode_js_escapes(value)
+    if decoded then add_reconstructed(decoded, "escaped_string_payload") end
+    local pct = decode_percent_bytes(value)
+    if pct then add_reconstructed(pct, "percent_encoded_payload") end
+    return true
+  end
+
+  for value in script:gmatch("'([^'\n]-)'") do if not inspect_quoted(value) then break end end
+  for value in script:gmatch('"([^"\n]-)"') do if not inspect_quoted(value) then break end end
+
+  for args in script:gmatch("[Ff]rom[Cc]har[Cc]ode%s*%(([^%)]+)%)") do
+    reconstruct_ops = reconstruct_ops + 1
+    if timed_out(reconstruct_ops) then break end
+    local bytes, valid = {}, true
+    for token in args:gmatch("[^,%s]+") do
+      local n
+      local hx = token:match("^0[xX](%x+)$")
+      if hx then n = tonumber(hx, 16) else n = tonumber(token) end
+      if not n or n < 0 or n > 255 then valid = false; break end
+      bytes[#bytes + 1] = string.char(n)
+      if #bytes > (LOBFUS.max_uint8array_bytes or 2048) then valid = false; break end
+    end
+    if valid and #bytes >= 4 then add_reconstructed(table.concat(bytes), "fromcharcode_payload") end
+  end
+
+  for arr in script:gmatch("%[([%s,0xXa-fA-F%d]+)%]") do
+    reconstruct_ops = reconstruct_ops + 1
+    if timed_out(reconstruct_ops) then break end
+    local bytes, count, valid = {}, 0, true
+    for token in arr:gmatch("[^,%s]+") do
+      local hx = token:match("^0[xX](%x+)$")
+      if not hx then valid = false; break end
+      local n = tonumber(hx, 16)
+      if not n or n < 0 or n > 255 then valid = false; break end
+      count = count + 1
+      bytes[#bytes + 1] = string.char(n)
+      if count > (LOBFUS.max_uint8array_bytes or 2048) then valid = false; break end
+    end
+    if valid and count >= 8 then add_reconstructed(table.concat(bytes), "hex_array_payload") end
+  end
+
+  for inside in script:gmatch("[Nn]ew%s+[Bb]lob%s*%(%s*%[([^%]]+)%]") do
+    reconstruct_ops = reconstruct_ops + 1
+    if timed_out(reconstruct_ops) then break end
+    local out, valid, parts = {}, true, 0
+    for token in inside:gmatch("([^,]+)") do
+      token = trim(token)
+      local value = resolve_token(token) or raw_var_map[token]
+      if not value then
+        local q = token:match("^'([^']*)'$") or token:match('^"([^"]*)"$')
+        if q then value = decode_js_escapes(q) or decode_percent_bytes(q) or q end
+      end
+      if not value then valid = false; break end
+      parts = parts + 1
+      out[#out + 1] = value
+      if parts > 20 then valid = false; break end
+    end
+    if valid and parts >= 2 then add_reconstructed(table.concat(out), "blob_concat_payload") end
+  end
+
   local resolve_region = script:sub(1, math.min(#script, 20000))
   local passes = tonumber(LOBFUS.resolve_passes) or 8
   if #script > 100000 then passes = math.min(passes, 2)
@@ -1611,7 +1883,7 @@ local function advanced_deobfuscate(script, timeout_ms)
     local changed = false
     for target, expr in resolve_region:gmatch("([%w_]+)%s*=%s*([^;\n]+)") do
       resolve_ops = resolve_ops + 1
-      if timed_out(resolve_ops) then return clean, virtuals, 1 end
+      if timed_out(resolve_ops) then return clean, virtuals, 1, raw_virtuals end
       target = trim(target); expr = trim(expr)
       if target ~= "" and #target <= 64 and expr ~= "" then
         if var_map[target] or var_cnt < (LSCRIPT.max_vars or 20) then
@@ -1631,7 +1903,7 @@ local function advanced_deobfuscate(script, timeout_ms)
   end
 
   clean = clean:gsub('"%s*%+%s*"', ""):gsub("'%s*%+%s*'", "")
-  return clean, virtuals, timeout_flag
+  return clean, virtuals, timeout_flag, raw_virtuals
 end
 
 -- =========================
@@ -1671,6 +1943,11 @@ local function sniff_decoded(bin)
   local ok, result = pcall(function()
     if not bin or #bin < 16 then return nil end
     if is_valid_pe(bin) then return "PE" end
+    if bin:sub(1, 2) == "\031\139" then return "GZIP" end
+    if bin:sub(1, 3) == "BZh" then return "BZIP2" end
+    if bin:sub(1, 6) == "\2537zXZ\000" then return "XZ" end
+    if bin:sub(1, 4) == "\040\181\047\253" then return "ZSTD" end
+    if #bin >= 262 and bin:sub(258, 262) == "ustar" then return "TAR" end
     if bin:sub(1, 4) == "MSCF" then return "CAB" end
     if bin:sub(1, 6) == "7z\xBC\xAF\x27\x1C" then return "7ZIP" end
     if bin:sub(1, 6) == "Rar!\x1A\x07" then return "RAR" end
@@ -1703,8 +1980,8 @@ local function sniff_decoded(bin)
     if l:find("<appinstaller", 1, true) then return "XML_APPINSTALLER" end
     if l:find("<?xml", 1, true) then return "XML" end
     if l:find("<svg", 1, true) then return "SVG" end
+    if l:find("<hta:", 1, true) or l:find("application%s*=", 1, false) or l:find("showintaskbar", 1, true) then return "HTA" end
     if l:find("<html", 1, true) or l:find("<script", 1, true) then return "HTML" end
-    if l:find("<hta:", 1, true) or l:find("application%s*=") or l:find("showintaskbar", 1, true) then return "HTA" end
 	local vbs_ind = 0
 	if l:find("wscript.createobject", 1, true) then vbs_ind = vbs_ind + 1 end
 	if l:find("on error resume next", 1, true) then vbs_ind = vbs_ind + 1 end
@@ -1714,7 +1991,8 @@ local function sniff_decoded(bin)
 	local ps_ind = 0
 	if l:find("powershell", 1, true) then ps_ind = ps_ind + 1 end
 	if l:find("invoke-expression", 1, true) then ps_ind = ps_ind + 1 end
-	if l:find("%biex%b", 1, false) or l:find("%-enc%s+", 1, false) then ps_ind = ps_ind + 1 end
+	if l:find("%f[%a]iex%f[%A]", 1, false) or l:find("%-enc%s+", 1, false) then ps_ind = ps_ind + 1 end
+	if l:find("frombase64string", 1, true) or l:find("downloadstring", 1, true) or l:find("invoke%-webrequest", 1, false) or l:find("new%-object", 1, false) then ps_ind = ps_ind + 1 end
 	if ps_ind >= 2 then return "PS1" end
     local bat_ind = 0
     if l:find("@echo off", 1, true) then bat_ind = bat_ind + 1 end
@@ -1760,6 +2038,7 @@ local function part_is_likely_attachment_vector(p)
   if not p then return false end
   local fname = part_get_filename_lc(p)
   local ctype = part_get_type_lc(p)
+  if fname ~= "" then return true end
   if fname:match("%.pdf$") or fname:match("%.svg$") or fname:match("%.chm$") or fname:match("%.hta$") or fname:match("%.one$") or fname:match("%.lnk$") or fname:match("%.js$") or fname:match("%.vbs$") or fname:match("%.ps1$") or fname:match("%.wsf$") or fname:match("%.docm$") or fname:match("%.xlsm$") or fname:match("%.pptm$") or fname:match("%.cer$") or fname:match("%.crt$") or fname:match("%.p7b$") or fname:match("%.p7c$") or fname:match("%.pfx$") or fname:match("%.p12$") or fname:match("%.pem$") then
     return true
   end
@@ -2419,50 +2698,81 @@ local function byte_clamp(n)
   return n
 end
 
+local function parse_byte_array(array_content, max_bytes)
+  local byte_values, byte_count = {}, 0
+  local maxb = tonumber(max_bytes) or tonumber(LOBFUS.max_uint8array_bytes) or 2048
+  for token in (array_content or ""):gmatch("[^,%s]+") do
+    local n
+    local hx = token:match("^0x(%x+)$")
+    if hx then n = tonumber(hx, 16) else n = tonumber(token) end
+    if not n or n < 0 or n > 255 then return nil, byte_count end
+    byte_count = byte_count + 1
+    if byte_count <= maxb then byte_values[#byte_values + 1] = string.char(byte_clamp(n)) end
+    if byte_count > maxb then break end
+  end
+  if #byte_values == 0 then return nil, byte_count end
+  return table.concat(byte_values), byte_count
+end
+
+local function apply_uint8_kind(ctx, kind)
+  if kind == "PE" then ctx:set_critical("PE"); ctx:add_module_reason("uint8array", "pe_uint8array"); return true end
+  if kind == "WASM" then ctx:set_critical("WASM"); ctx:add_module_reason("uint8array", "wasm_uint8array"); return true end
+  if kind == "ZIP" then ctx:set_payload_kind("ZIP"); ctx:add_module_reason("uint8array", "zip_uint8array"); return true end
+  if kind == "PDF" then ctx:set_observed_kind("PDF"); ctx:add_module_reason("uint8array", "pdf_uint8array"); return true end
+  local reason_map = {
+    CAB = "dec_cab", RAR = "dec_rar", ["7ZIP"] = "dec_7zip", OLE = "dec_ole",
+    VHDX = "dec_vhdx", LNK = "dec_lnk", CHM = "att_chm_attachment",
+    GZIP = "dec_compressed", BZIP2 = "dec_compressed", XZ = "dec_compressed",
+    ZSTD = "dec_compressed", TAR = "dec_compressed",
+  }
+  local reason = reason_map[kind]
+  if reason then
+    local mod = (kind == "CHM") and "attachment_vectors" or "decoded_payload"
+    ctx:add_module_reason(mod, reason)
+    ctx:set_payload_kind(kind)
+    return true
+  end
+  return false
+end
+
 local function scan_uint8array_module(ctx, script_raw, meta)
   if not module_enabled("uint8array") or not meta.maybe_uint8 then return end
   local ok = pcall(function()
-    local lc, mod = (script_raw or ""):lower(), "uint8array"
-    local patterns = {
-      "uint8array%s*%(%s*%[%s*([%d%s,]+)",
-      "uint8array%.from%s*%(%s*%[%s*([%d%s,]+)",
-    }
-    local found = false
-    for _, array_pattern in ipairs(patterns) do
-      if found then break end
-      for array_content in lc:gmatch(array_pattern) do
-        local byte_values, byte_count = {}, 0
-        local maxb = tonumber(LOBFUS.max_uint8array_bytes) or 2048
-        for num_str in array_content:gmatch("%d+") do
-          byte_count = byte_count + 1
-          if byte_count <= maxb then byte_values[#byte_values + 1] = tonumber(num_str) or 0 end
-          if byte_count > maxb then break end
-        end
-        if byte_count > (THRESHOLDS.uint8array_large_min or 1024) then
-          ctx:add_module_reason(mod, "uint8array_payload")
-          local header_bytes = {}
-          for i = 1, math.min(16, #byte_values) do header_bytes[#header_bytes + 1] = string.char(byte_clamp(byte_values[i])) end
-          local header = table.concat(header_bytes)
-          if #header >= 4 then
-            if header:sub(1, 4) == "\000asm" then
-              ctx:set_critical("WASM")
-              ctx:add_module_reason(mod, "wasm_uint8array")
-            elseif header:sub(1, 2) == "MZ" then
-              ctx:set_critical("PE")
-              ctx:add_module_reason(mod, "pe_uint8array")
-            elseif header:sub(1, 4) == "PK\003\004" then
-              ctx:set_payload_kind("ZIP")
-              ctx:add_module_reason(mod, "zip_uint8array")
-            elseif header:sub(1, 5) == "%PDF-" then
-              ctx:add_module_reason(mod, "pdf_uint8array")
-            else
-              ctx:add_module_reason(mod, "large_uint8array")
-            end
-          else
-            ctx:add_module_reason(mod, "large_uint8array")
+    local lc = (script_raw or ""):lower()
+    local arrays, array_count = {}, 0
+    local maxb = tonumber(LOBFUS.max_uint8array_bytes) or 2048
+
+    for name, body in lc:gmatch("([%w_]+)%s*=%s*%[([^%]]+)%]") do
+      if not arrays[name] and array_count < (LSCRIPT.max_vars or 20) then
+        arrays[name] = body
+        array_count = array_count + 1
+      end
+    end
+
+    local bodies = {}
+    for body in lc:gmatch("uint8array%s*%(%s*%[([^%]]+)%]") do bodies[#bodies + 1] = body end
+    for body in lc:gmatch("uint8array%.from%s*%(%s*%[([^%]]+)%]") do bodies[#bodies + 1] = body end
+    for name in lc:gmatch("uint8array%s*%(%s*([%w_]+)%s*%)") do if arrays[name] then bodies[#bodies + 1] = arrays[name] end end
+    for name in lc:gmatch("uint8array%.from%s*%(%s*([%w_]+)%s*%)") do if arrays[name] then bodies[#bodies + 1] = arrays[name] end end
+
+    local seen = {}
+    for _, body in ipairs(bodies) do
+      if not seen[body] then
+        seen[body] = true
+        local decoded, byte_count = parse_byte_array(body, maxb)
+        if decoded and #decoded >= 4 then
+          local kind = sniff_decoded(decoded)
+          local recognized = kind and kind ~= "BINARY"
+          if recognized then
+            ctx:add_module_reason("uint8array", "uint8array_payload")
+            apply_uint8_kind(ctx, kind)
+          elseif byte_count > (THRESHOLDS.uint8array_large_min or 1024) then
+            ctx:add_module_reason("uint8array", "large_uint8array")
+          elseif byte_count >= 64 and (lc:find("blob", 1, true) or lc:find("createobjecturl", 1, true)) then
+            ctx:add_module_reason("uint8array", "uint8array_payload")
           end
-          found = true
-          break
+          if byte_count > (THRESHOLDS.uint8array_large_min or 1024) then ctx:add_module_reason("uint8array", "large_uint8array") end
+          if has_any_critical_kind(ctx) then break end
         end
       end
     end
@@ -2651,6 +2961,18 @@ analyze_decoded_blob = function(ctx, decoded)
 
   if kind == "ZIP" then
     add_decoded("decoded_payload", "dec_zip", "ZIP")
+    local zl = decoded:sub(1, 200000):lower()
+    if zl:find("%.exe", 1, false) or zl:find("%.dll", 1, false) or zl:find("%.lnk", 1, false) or
+       zl:find("%.hta", 1, false) or zl:find("%.jse", 1, false) or zl:find("%.vbs", 1, false) or
+       zl:find("%.ps1", 1, false) or zl:find("%.chm", 1, false) or zl:find("%.iso", 1, false) or
+       zl:find("%.img", 1, false) or zl:find("%.vhd", 1, false) then
+      ctx:add_module_reason("decoded_payload", "zip_executable_member")
+    end
+    return
+  end
+
+  if kind == "GZIP" or kind == "BZIP2" or kind == "XZ" or kind == "ZSTD" or kind == "TAR" then
+    add_decoded("decoded_payload", "dec_compressed", kind)
     return
   end
 
@@ -2752,13 +3074,28 @@ analyze_decoded_blob = function(ctx, decoded)
     return
   end
 
+  if kind == "BINARY" and is_mostly_printable(decoded, 0.85) and ctx.decode_depth < ctx.max_decode_depth then
+    local nested = extract_b64_candidates(decoded, tonumber(LDEC.nested_max_candidates) or 3)
+    for _, cand in ipairs(nested) do
+      local nb = normalize_b64(cand)
+      local inner = safe_decode_base64(ctx.task, nb, LDEC.max_bytes)
+      if inner and #inner > 0 and inner ~= decoded then
+        ctx:add_module_reason("decoded_payload", "nested_base64_payload")
+        ctx.decode_depth = ctx.decode_depth + 1
+        analyze_decoded_blob(ctx, inner)
+        ctx.decode_depth = ctx.decode_depth - 1
+        if has_any_critical_kind(ctx) or sniff_decoded(inner) ~= "BINARY" then return end
+      end
+    end
+  end
+
   ctx:add_module_reason("js_smuggling", "dec_bin")
 end
 
 collect_script_meta = function(script_view)
   local sl = script_view.lc
   local maybe_b64    = sl:find("atob", 1, true) ~= nil or sl:find("base64", 1, true) ~= nil
-  local maybe_concat = sl:find("%+=", 1, false) ~= nil or sl:find(".join", 1, true) ~= nil
+  local maybe_concat = sl:find("+=", 1, true) ~= nil or sl:find(".join", 1, true) ~= nil
   local maybe_obfus  = sl:find("\\x", 1, true) ~= nil or sl:find("\\u", 1, true) ~= nil or sl:find("fromcharcode", 1, true) ~= nil or sl:find("_0x", 1, true) ~= nil
   local maybe_uint8  = sl:find("uint8array", 1, true) ~= nil
   local maybe_hex    = sl:find("0x%x%x", 1, false) ~= nil
@@ -2766,6 +3103,11 @@ collect_script_meta = function(script_view)
   local maybe_web3   = sl:find("ethers", 1, true) ~= nil or sl:find("web3", 1, true) ~= nil or sl:find("ethereum", 1, true) ~= nil
   local maybe_css    = sl:find("getcomputedstyle", 1, true) ~= nil
   local maybe_rc4    = sl:find("rc4", 1, true) ~= nil or sl:find("ksa", 1, true) ~= nil or sl:find("prga", 1, true) ~= nil or (sl:find("decrypt", 1, true) ~= nil and sl:find("key", 1, true) ~= nil)
+  local maybe_escape = sl:find("\\x%x%x", 1, false) ~= nil or sl:find("\\u00%x%x", 1, false) ~= nil
+  local maybe_fromchar = sl:find("fromcharcode%s*%(", 1, false) ~= nil
+  local maybe_percent = sl:find("decodeuricomponent%s*%(", 1, false) ~= nil or sl:find("unescape%s*%(", 1, false) ~= nil
+  local maybe_hex_array = sl:find("%[%s*0x%x%x%s*,", 1, false) ~= nil
+  local maybe_blob_parts = sl:find("new%s+blob%s*%(%s*%[", 1, false) ~= nil
 
   local maybe_array_join =
     (sl:find("%.join%s*%(", 1, false) ~= nil) and
@@ -2776,6 +3118,7 @@ collect_script_meta = function(script_view)
       sl:find("const%s+[%w_]+%s*=%s*%[", 1, false) ~= nil
     )
 
+  local reconstructable = maybe_escape or maybe_fromchar or maybe_percent or maybe_hex_array or maybe_blob_parts
   return {
     maybe_b64 = maybe_b64,
     maybe_concat = maybe_concat,
@@ -2787,8 +3130,13 @@ collect_script_meta = function(script_view)
     maybe_css = maybe_css,
     maybe_rc4 = maybe_rc4,
     maybe_array_join = maybe_array_join,
-    is_interesting = (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or maybe_wasm or maybe_web3 or maybe_css or maybe_rc4 or maybe_array_join),
-    allow_decode_path = (maybe_b64 or maybe_concat or maybe_obfus or maybe_array_join),
+    maybe_escape = maybe_escape,
+    maybe_fromchar = maybe_fromchar,
+    maybe_percent = maybe_percent,
+    maybe_hex_array = maybe_hex_array,
+    maybe_blob_parts = maybe_blob_parts,
+    is_interesting = (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or maybe_wasm or maybe_web3 or maybe_css or maybe_rc4 or maybe_array_join or reconstructable),
+    allow_decode_path = (maybe_b64 or maybe_concat or maybe_obfus or maybe_array_join or reconstructable),
   }
 end
 
@@ -2805,17 +3153,18 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
 
   local sscan = smart_text_scan(script_raw, LSCRIPT.smart_chunk)
   local norm  = sscan:gsub('"%s*%+%s*"', ""):gsub("'%s*%+%s*'", "")
-  local virtuals = {}
+  local virtuals, raw_virtuals = {}, {}
 
-  if meta.maybe_concat or meta.maybe_obfus or meta.maybe_array_join then
-    local deob, vlist, tflag = advanced_deobfuscate(script_raw, LSCRIPT.deobfus_timeout_ms)
+  if meta.maybe_concat or meta.maybe_obfus or meta.maybe_array_join or meta.maybe_escape or meta.maybe_fromchar or meta.maybe_percent or meta.maybe_hex_array or meta.maybe_blob_parts then
+    local deob, vlist, tflag, raw_vlist = advanced_deobfuscate(script_raw, LSCRIPT.deobfus_timeout_ms)
     norm = deob
     virtuals = vlist or {}
+    raw_virtuals = raw_vlist or {}
     if tflag == 1 then ctx:add_info("deobfus_timeout") end
     decode_dbg(
       ctx.task,
-      "HTML_SMUGGLING_DBG || deobfuscate done: virtuals=%d tflag=%d norm_len=%d",
-      #virtuals, tflag, #(norm or "")
+      "HTML_SMUGGLING_DBG || deobfuscate done: virtuals=%d raw_virtuals=%d tflag=%d norm_len=%d",
+      #virtuals, #raw_virtuals, tflag, #(norm or "")
     )
   end
 
@@ -2864,6 +3213,15 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
   end
   end
  
+  if raw_virtuals and #raw_virtuals > 0 then
+    table.sort(raw_virtuals, function(a, b) return (a.score or 0) > (b.score or 0) end)
+    for _, item in ipairs(raw_virtuals) do
+      if item.reason then ctx:add_module_reason("obfuscation", item.reason) end
+      if item.data and #item.data > 0 then analyze_decoded_blob(ctx, item.data) end
+      if has_any_critical_kind(ctx) or ctx:has_reason("dec_script") then break end
+    end
+  end
+
   if not cands or #cands == 0 then
     decode_dbg(ctx.task, "HTML_SMUGGLING_DBG || no cands after virtuals")
     return
@@ -2888,7 +3246,11 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
   if total_b64_len >= (LB64.huge_threshold or 20000) then ctx:add_module_reason("js_smuggling", "b64_total_len_huge") end
   if #cands > 1 then ctx:add_module_reason("js_smuggling", "b64_joined_parts") end
 
-  if total_b64_len < min_decode_total then
+  local has_magic_candidate = false
+  for _, cand in ipairs(cands) do if base64_magic_hint(cand) then has_magic_candidate = true; break end end
+  if has_magic_candidate then ctx:add_module_reason("js_smuggling", "b64_magic_prefix") end
+
+  if total_b64_len < min_decode_total and not has_magic_candidate then
     decode_dbg(
       ctx.task,
       "HTML_SMUGGLING_DBG || STOP: total_b64_len %d < min_decode_total %d",
@@ -3009,13 +3371,16 @@ local function score_script_interest(entry)
   if lc:find("_0x", 1, true) then score = score + 2 end
   if lc:find("%+=", 1, false) then score = score + 1 end
   if has_long_base64_sequence(lc, 100) then score = score + 3 end
+  for raw in entry.body:gmatch("[A-Za-z0-9%+/_=-]+") do
+    if #raw >= (LB64.magic_min_len or 40) and base64_magic_hint(raw) then score = score + 100; break end
+  end
   -- FIX v4.3.7b: Array-Join Pattern als Interest-Signal
   if lc:find("%.join%s*%(", 1, false) and lc:find("%[", 1, false) then score = score + 2 end
   return score
 end
 
 local function select_top_script_entries(entries, max_check)
-  max_check = tonumber(max_check) or 3
+  max_check = tonumber(max_check) or 5
   local inline = {}
   for _, entry in ipairs(entries or {}) do
     if entry.is_inline and #entry.body >= (THRESHOLDS.script_min_len or 20) then
@@ -3023,9 +3388,18 @@ local function select_top_script_entries(entries, max_check)
       inline[#inline + 1] = entry
     end
   end
-  table.sort(inline, function(a, b) return a.interest_score > b.interest_score end)
-  local selected = {}
-  for i = 1, math.min(max_check, #inline) do selected[i] = inline[i] end
+  table.sort(inline, function(a, b)
+    if a.interest_score == b.interest_score then return #a.body > #b.body end
+    return a.interest_score > b.interest_score
+  end)
+  local selected, hard_extra = {}, 0
+  for _, entry in ipairs(inline) do
+    local is_magic = entry.interest_score >= 100
+    if #selected < max_check or (is_magic and hard_extra < 2) then
+      selected[#selected + 1] = entry
+      if #selected > max_check then hard_extra = hard_extra + 1 end
+    end
+  end
   return selected
 end
 
@@ -3079,12 +3453,89 @@ end
 -- =========================
 -- Attachment Vectors
 -- =========================
+local function expected_kind_from_filename(fname)
+  if not fname or fname == "" then return nil end
+  if fname:match("%.exe$") or fname:match("%.dll$") or fname:match("%.scr$") then return "PE" end
+  if fname:match("%.pdf$") then return "PDF" end
+  if fname:match("%.zip$") or fname:match("%.docx$") or fname:match("%.xlsx$") or fname:match("%.pptx$") or fname:match("%.docm$") or fname:match("%.xlsm$") or fname:match("%.pptm$") then return "ZIP" end
+  if fname:match("%.cab$") then return "CAB" end
+  if fname:match("%.rar$") then return "RAR" end
+  if fname:match("%.7z$") then return "7ZIP" end
+  if fname:match("%.iso$") then return "ISO" end
+  if fname:match("%.lnk$") then return "LNK" end
+  if fname:match("%.chm$") then return "CHM" end
+  if fname:match("%.vhdx$") then return "VHDX" end
+  if fname:match("%.hta$") then return "HTA" end
+  if fname:match("%.js$") or fname:match("%.jse$") then return "JS" end
+  if fname:match("%.vbs$") or fname:match("%.vbe$") then return "VBS" end
+  if fname:match("%.ps1$") then return "PS1" end
+  if fname:match("%.bat$") or fname:match("%.cmd$") then return "BAT" end
+  return nil
+end
+
+local function apply_content_kind(ctx, kind)
+  if kind == "PE" then ctx:add_module_reason("decoded_payload", "dec_pe"); ctx:set_critical("PE"); return true end
+  if kind == "WASM" then ctx:add_module_reason("decoded_payload", "dec_wasm"); ctx:set_critical("WASM"); return true end
+  if kind == "LNK" then ctx:add_module_reason("decoded_payload", "dec_lnk"); ctx:set_payload_kind("LNK"); return true end
+  if kind == "CHM" then ctx:add_module_reason("attachment_vectors", "att_chm_attachment"); ctx:set_payload_kind("CHM"); return true end
+  if kind == "HTA" then ctx:add_module_reason("attachment_vectors", "att_hta_attachment"); ctx:set_payload_kind("SCRIPT"); return true end
+  if kind == "VBS" or kind == "PS1" or kind == "BAT" then ctx:add_module_reason("decoded_payload", "dec_script"); ctx:set_payload_kind("SCRIPT"); return true end
+  if kind == "ISO" then ctx:add_module_reason("decoded_payload", "dec_iso"); ctx:set_payload_kind("ISO"); return true end
+  if kind == "VHDX" then ctx:add_module_reason("decoded_payload", "dec_vhdx"); ctx:set_payload_kind("VHDX"); return true end
+  return false
+end
+
+local function is_hard_binary_kind(kind)
+  return kind == "PE" or kind == "WASM" or kind == "LNK" or kind == "CHM" or
+         kind == "ISO" or kind == "VHDX" or kind == "HTA"
+end
+
+local function find_last_plain(s, needle)
+  local pos, last = 1, nil
+  while true do
+    local p = s:find(needle, pos, true)
+    if not p then break end
+    last = p
+    pos = p + 1
+  end
+  return last
+end
+
+local function extract_image_tail(raw, fname, ctype)
+  if not raw or #raw < 16 then return nil end
+  fname, ctype = fname or "", ctype or ""
+  local end_pos
+  if fname:match("%.png$") or ctype:find("image/png", 1, true) then
+    local marker = "\000\000\000\000IEND\174B\096\130"
+    local p = find_last_plain(raw, marker)
+    if p then end_pos = p + #marker - 1 end
+  elseif fname:match("%.jpe?g$") or ctype:find("image/jpeg", 1, true) then
+    local p = find_last_plain(raw, "\255\217")
+    if p then end_pos = p + 1 end
+  elseif fname:match("%.gif$") or ctype:find("image/gif", 1, true) then
+    local p = find_last_plain(raw, "\059")
+    if p then end_pos = p end
+  elseif fname:match("%.webp$") or ctype:find("image/webp", 1, true) then
+    if raw:sub(1, 4) == "RIFF" and raw:sub(9, 12) == "WEBP" then
+      local size = le_u32(raw, 4)
+      if size then end_pos = math.min(#raw, size + 8) end
+    end
+  end
+  if not end_pos or end_pos >= #raw then return nil end
+  local tail = raw:sub(end_pos + 1)
+  local max_tail = tonumber(LSCAN.image_tail_max) or (256 * 1024)
+  if #tail > max_tail then tail = tail:sub(1, max_tail) end
+  if #tail < 4 then return nil end
+  return tail
+end
+
 local function scan_attachment_vectors_module(ctx, part)
   if not module_enabled("attachment_vectors") then return end
   local fname = part_get_filename_lc(part)
   local ctype = part_get_type_lc(part)
-  local text  = lower_limit_text(part_get_content_text(part, LSCAN.max_attachment_text), LSCAN.max_attachment_text)
-  if fname == "" and ctype == "" and text == "" then return end
+  local raw   = part_get_content_text(part, LSCAN.max_attachment_magic)
+  local text  = lower_limit_text(raw, LSCAN.max_attachment_text)
+  if fname == "" and ctype == "" and raw == "" then return end
   ctx.phase.attach_parts_seen = ctx.phase.attach_parts_seen + 1
 
   local mod = "attachment_vectors"
@@ -3146,6 +3597,46 @@ local function scan_attachment_vectors_module(ctx, part)
     hit = true
   end
   if fname:match("%.html?$") and text ~= "" and Policy.has_basic_js_gate(text) then ctx:add_module_reason(mod, "att_html_attachment"); hit = true end
+
+  if raw ~= "" then
+    local actual_kind = sniff_decoded(raw)
+    local expected_kind = expected_kind_from_filename(fname)
+    if actual_kind and actual_kind ~= "BINARY" and expected_kind and actual_kind ~= expected_kind then
+      ctx:add_module_reason(mod, "attachment_magic_mismatch")
+      analyze_decoded_blob(ctx, raw)
+      hit = true
+    elseif actual_kind and expected_kind and actual_kind == expected_kind then
+      if apply_content_kind(ctx, actual_kind) then hit = true end
+    elseif actual_kind and is_hard_binary_kind(actual_kind) then
+      ctx:add_module_reason(mod, "attachment_magic_mismatch")
+      if apply_content_kind(ctx, actual_kind) then hit = true end
+    elseif actual_kind and (actual_kind == "VBS" or actual_kind == "PS1" or actual_kind == "BAT") and
+           ctype:find("application/octet%-stream", 1, false) then
+      ctx:add_module_reason(mod, "attachment_magic_mismatch")
+      if apply_content_kind(ctx, actual_kind) then hit = true end
+    end
+
+    local tail = extract_image_tail(raw, fname, ctype)
+    if tail then
+      local tail_kind = sniff_decoded(tail)
+      if tail_kind and tail_kind ~= "BINARY" then
+        ctx:add_module_reason(mod, "image_appended_payload")
+        analyze_decoded_blob(ctx, tail)
+        hit = true
+      elseif is_mostly_printable(tail, 0.85) then
+        local tcands = extract_b64_candidates(tail, 2)
+        for _, cand in ipairs(tcands) do
+          local decoded = safe_decode_base64(ctx.task, normalize_b64(cand), LDEC.max_bytes)
+          if decoded and sniff_decoded(decoded) ~= "BINARY" then
+            ctx:add_module_reason(mod, "image_appended_payload")
+            analyze_decoded_blob(ctx, decoded)
+            hit = true
+            break
+          end
+        end
+      end
+    end
+  end
 
   if hit then ctx.phase.attach_parts_scanned = ctx.phase.attach_parts_scanned + 1 end
 end
@@ -3316,6 +3807,7 @@ local function build_reason_summary(reasons)
 
   if reasons["dec_zip"] or reasons["zip_uint8array"] or reasons["dec_iso"] or reasons["dec_lnk"] or reasons["dec_vhdx"] or
      reasons["dec_ole"] or reasons["dec_cab"] or reasons["dec_7zip"] or reasons["dec_rar"] or
+     reasons["dec_compressed"] or reasons["attachment_magic_mismatch"] or reasons["image_appended_payload"] or
      reasons["att_chm_attachment"] or reasons["att_onenote_attachment"] or
      reasons["att_office_macro_container"] or reasons["att_lnk_attachment"] then
     add_tag("[CONTAINER]")
@@ -3327,12 +3819,15 @@ local function build_reason_summary(reasons)
   end
 
   if reasons["atob_obfuscated"] or reasons["obfus_api"] or reasons["polymorphic_obfuscation"] or
-     reasons["hex_array"] or reasons["fromcharcode_api"] or reasons["array_join_concat"] then
+     reasons["hex_array"] or reasons["fromcharcode_api"] or reasons["array_join_concat"] or
+     reasons["escaped_string_payload"] or reasons["fromcharcode_payload"] or reasons["percent_encoded_payload"] or
+     reasons["hex_array_payload"] or reasons["blob_concat_payload"] then
     add_tag("[VERSCHLEIERT]")
   end
 
   if reasons["atob"] or reasons["blob"] or reasons["createObjectURL"] or reasons["fetch"] or
      reasons["split_payload"] or reasons["delayed_execution"] or reasons["uint8array_payload"] or
+     reasons["b64_magic_prefix"] or reasons["nested_base64_payload"] or
      reasons["att_svg_smuggling_context"] or reasons["b64_joined_parts"] or reasons["virtual_b64_candidates"] then
     add_tag("[JS_SMUGGLING]")
   end
@@ -3734,6 +4229,8 @@ if DEBUG then
     scan_certificate_smuggling_part_module = scan_certificate_smuggling_part_module,
     scan_image_smuggling_info_part_module = scan_image_smuggling_info_part_module,
     extract_b64_candidates = extract_b64_candidates,
+    advanced_deobfuscate = advanced_deobfuscate,
+    base64_magic_hint = base64_magic_hint,
     sniff_decoded = sniff_decoded,
     calculate_entropy = calculate_entropy,
     finalize_score = finalize_score,
