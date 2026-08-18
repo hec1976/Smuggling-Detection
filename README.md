@@ -1,12 +1,12 @@
-# HTML Smuggling Detection v4.5.0
+# HTML Smuggling Detection v4.6.0
 
-![Version](https://img.shields.io/badge/Version-4.5.0-green)
+![Version](https://img.shields.io/badge/Version-4.6.0-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
 ![Security](https://img.shields.io/badge/Focus-HTML%20Smuggling%20%26%20Payload%20Detection-red)
 
 Rspamd-Lua-Modul zur Erkennung von **HTML Smuggling**, verschleierten JavaScript-Payloads, Base64-/Byte-Array-Staging sowie ergänzenden **Non-HTML- und Attachment-Vektoren**.
 
-Version **4.5.0** erweitert die Payload-Rekonstruktion und Inhaltsklassifizierung deutlich, ohne den Ansatz eines performanten Mail-Gateway-Scanners zu verlassen.
+Version **4.6.0** erweitert den Scanner vor allem bei **Ressourcensteuerung, Script-Prescan, ZIP-Inhaltsanalyse und begrenzter Crypto-Rekonstruktion**. Die bestehenden v4.5-Pfade für Magic-Prefixe, rekursives Decoding, Attachment-Magic-Prüfung und Image-Tail-Carving bleiben erhalten.
 
 ---
 
@@ -34,34 +34,54 @@ Das Ziel ist **keine vollständige forensische Dateianalyse**, sondern eine robu
 
 ---
 
-## Was ist neu in v4.5.0?
+## Was ist neu in v4.6.0?
 
-Die wichtigsten Erweiterungen gegenüber v4.4.0:
+Die wichtigsten Erweiterungen gegenüber v4.5.0:
 
-- **Base64 Magic-Prefix Fast-Path** für kleine PE-, ZIP-, PDF-, WASM-, CAB-, RAR-, 7ZIP-, OLE-, LNK- und CHM-Payloads
-- Base64-Kandidaten werden zuerst **gesammelt, bewertet und priorisiert**
-- `Uint8Array` verarbeitet **dezimale und hexadezimale Bytewerte**
-- Unterstützung von `Uint8Array` über zuvor definierte Array-Variablen
-- zusätzliche Deobfuskations-Pfade für:
-  - Escape-Sequenzen
-  - `fromCharCode`
-  - Percent-Encoding
-  - Hex-Arrays
-  - Blob-/String-Konkatenationen
-- **rekursive Base64-Erkennung** für druckbare Zwischenstufen
-- Standard-Decode-Tiefe: **3**
-- zusätzliche Magic-Erkennung für:
-  - GZIP
-  - BZIP2
-  - XZ
-  - ZSTD
-  - TAR
-- **Attachment-Inhaltsprüfung** mit Magic-/Dateiendungs-Abgleich
-- **Image-Tail-Carving** für PNG, JPEG, GIF und WebP
-- priorisierte Script-Auswahl anhand des Payload-Interesses
-- standardmässig bis zu **5 relevante Scripts**
-- Magic-Prefix-Payloads erhalten bei der Script-Auswahl höchste Priorität
-- ZIP-Inhalte werden auf ausführbare oder scriptbasierte Dateinamen geprüft
+- **globales Nachrichtenbudget** für:
+  - maximale Laufzeit
+  - insgesamt verarbeitete Bytes
+  - Decode-Operationen
+  - Container-Operationen
+  - Script-Prescan-Anzahl und Prescan-Bytes
+- **billiger Vorscan aller Inline-Scripts**, bevor nur die interessantesten Scripts tief analysiert werden
+- Prescan kann Scripts mit Magic-Prefixen oder typischen PE-/ZIP-Bytefolgen erzwingen
+- **echtes ZIP-Parsing** von Central Directory und Local File Headers
+- ZIP-Mitglieder werden auf sicherheitsrelevante Eigenschaften geprüft:
+  - ausführbare Dateien
+  - Script-Dateien
+  - verschachtelte Archive
+  - Double Extensions
+  - Path Traversal
+  - Encryption-Flag
+  - hohe Kompressionsraten
+  - sehr viele Einträge
+- unkomprimierte **stored ZIP-Mitglieder** können begrenzt extrahiert und erneut klassifiziert werden
+- **konstante XOR-Rekonstruktion** für statische Byte-/String-Payloads
+- **konstante RC4-Rekonstruktion** für statische Schlüssel und Payload-Kandidaten
+- neue Reasons wie:
+  - `script_prescan_payload`
+  - `zip_executable_member`
+  - `zip_script_member`
+  - `zip_nested_archive`
+  - `zip_encrypted`
+  - `zip_double_extension`
+  - `zip_path_traversal`
+  - `zip_stored_payload`
+  - `xor_constant_payload`
+  - `rc4_constant_payload`
+- neue Info-Reasons für Ressourcenlimits und unvollständige ZIP-Auswertung
+
+Die v4.5-Erweiterungen bleiben vollständig Bestandteil von v4.6.0, insbesondere:
+
+- Base64 Magic-Prefix Fast-Path
+- priorisierte Base64-Kandidaten
+- rekursives Base64-Decoding bis Tiefe 3
+- hexadezimale und dezimale `Uint8Array`-Payloads
+- zusätzliche Magic-Erkennung für GZIP, BZIP2, XZ, ZSTD und TAR
+- Attachment-Magic-/Dateiendungs-Abgleich
+- Image-Tail-Carving für PNG, JPEG, GIF und WebP
+- priorisierte Tiefenanalyse von standardmässig bis zu 5 Scripts
 
 ---
 
@@ -100,7 +120,22 @@ Danach werden interessante Inline-Scripts bewertet und priorisiert. Scripts mit 
 
 Standardmässig werden bis zu **5 Scripts** tief geprüft. Besonders interessante Magic-Payloads können zusätzlich berücksichtigt werden.
 
-### 4. Deobfuskation
+### 4. Globaler Script-Prescan
+
+Seit v4.6.0 werden Inline-Scripts vor der begrenzten Tiefenanalyse mit einem günstigen Prescan bewertet. Der Prescan sucht unter anderem nach:
+
+- `atob`
+- `createObjectURL`
+- `Uint8Array`
+- `fromCharCode` / `TextDecoder`
+- `Blob`
+- Crypto-/Decrypt-Kontexten
+- bekannten Base64-Magic-Prefixen
+- PE-/ZIP-Bytefolgen
+
+Ein starker Prescan-Treffer kann ein Script auch dann in die Tiefenanalyse bringen, wenn das reguläre `max_check` bereits erreicht ist.
+
+### 5. Deobfuskation
 
 Verdächtige Script-Inhalte werden kontrolliert rekonstruiert.
 
@@ -116,7 +151,7 @@ Unterstützt werden unter anderem:
 - `_0x...`-artige Variablen
 - Function-/Eval-Konstrukte
 
-### 5. Decode-Pfad
+### 6. Decode-Pfad
 
 Base64-Kandidaten werden:
 
@@ -129,7 +164,7 @@ Base64-Kandidaten werden:
 
 Druckbare Zwischenstufen können erneut auf Base64 untersucht werden. Die Standardtiefe liegt bei **3 Decode-Ebenen**.
 
-### 6. Payload-Klassifikation
+### 7. Payload-Klassifikation
 
 Dekodierte Inhalte können unter anderem erkannt werden als:
 
@@ -153,7 +188,7 @@ Dekodierte Inhalte können unter anderem erkannt werden als:
 - ZSTD
 - TAR
 
-### 7. Attachment-Inhaltsprüfung
+### 8. Attachment-Inhaltsprüfung
 
 Bei Attachments wird nicht nur der Dateiname betrachtet.
 
@@ -165,7 +200,7 @@ Das Modul vergleicht:
 
 Ein Widerspruch kann als `attachment_magic_mismatch` gewertet werden.
 
-### 8. Image-Tail-Carving
+### 9. Image-Tail-Carving
 
 Für PNG, JPEG, GIF und WebP kann Inhalt **hinter dem regulären Bildende** untersucht werden.
 
@@ -173,7 +208,23 @@ Wird dort ein weiterer erkennbarer Payload gefunden, entsteht der Grund:
 
 `image_appended_payload`
 
-### 9. Scoring und Marker
+### 10. ZIP-Analyse
+
+ZIP-Container werden in v4.6.0 nicht nur am Magic erkannt. Der Scanner liest begrenzt das Central Directory bzw. Local Headers und klassifiziert Einträge nach Dateiname, Flags und Grössen.
+
+Erkannt werden unter anderem:
+
+- Executables im ZIP
+- Scripts und LNK/HTA/CHM im ZIP
+- verschachtelte Archive
+- Double Extensions wie `rechnung.pdf.exe`
+- Path-Traversal-Namen wie `../payload.exe`
+- verschlüsselte ZIP-Einträge
+- auffällig hohe Kompressionsverhältnisse
+- zu viele Einträge
+- gespeicherte, unkomprimierte Payloads, die direkt erneut klassifiziert werden können
+
+### 11. Scoring und Marker
 
 Alle Reasons werden einer festen Policy-Klasse zugeordnet. Daraus werden Score, Caps, Marker und Ergebnistext berechnet.
 
@@ -211,6 +262,8 @@ Alle Reasons werden einer festen Policy-Klasse zugeordnet. Daraus werden Score, 
 - Percent-Encoding
 - Blob-Konkatenation
 - Array-Join-Obfuskation
+- konstante XOR-Rekonstruktion
+- konstante RC4-Rekonstruktion
 
 ### Evasion
 
@@ -280,6 +333,18 @@ Erkannt werden unter anderem:
   - DOCM
   - XLSM
   - PPTM
+
+### ZIP-Risiken
+
+- Executables im Archiv
+- Script-Dateien im Archiv
+- verschachtelte Archive
+- Double Extensions
+- Path Traversal
+- Encryption-Flag
+- hohe Kompressionsraten
+- sehr viele Einträge
+- Stored-Payload-Extraktion und erneute Klassifikation
 
 ### Zertifikats- und PKCS-Kontexte
 
@@ -383,7 +448,7 @@ weights {
 
 ## Limits
 
-Die Limits schützen den Mail-Gateway-Betrieb vor übermässigem CPU- und Speicherverbrauch.
+Die Limits schützen den Mail-Gateway-Betrieb vor übermässigem CPU-, Speicher- und Decode-Aufwand. v4.6.0 ergänzt zu den bisherigen Teilbudgets ein globales Nachrichtenbudget sowie eigene ZIP- und Crypto-Limits.
 
 ```lua
 limits {
@@ -417,15 +482,41 @@ limits {
   }
 
   script {
-    max_check             = 5;
-    max_external          = 5;
-    max_vars              = 20;
-    smart_chunk           = 20000;
-    max_script_len        = 80000;
-    max_total_script_scan = 120000;
-    max_script_time_ms    = 80.0;
-    deobfus_timeout_ms    = 50.0;
-    split_payload_min_vars = 6;
+    max_check                = 5;
+    max_external             = 5;
+    max_vars                 = 20;
+    smart_chunk              = 20000;
+    max_script_len           = 80000;
+    max_total_script_scan    = 120000;
+    max_script_time_ms       = 80.0;
+    deobfus_timeout_ms       = 50.0;
+    split_payload_min_vars   = 6;
+    prescan_chunk            = 4096;
+  }
+
+  budget {
+    max_runtime_ms           = 250.0;
+    max_total_bytes          = 4194304;
+    max_decode_ops           = 24;
+    max_container_ops        = 8;
+    max_scripts_prescanned   = 64;
+    max_script_prescan_bytes = 524288;
+  }
+
+  zip {
+    max_entries            = 256;
+    max_central_bytes      = 524288;
+    max_total_uncompressed = 67108864;
+    max_entry_uncompressed = 16777216;
+    max_stored_extract     = 524288;
+    max_member_name        = 1024;
+    high_ratio             = 100;
+  }
+
+  crypto {
+    max_input_bytes = 65536;
+    max_key_bytes   = 64;
+    max_candidates  = 4;
   }
 
   obfus {
@@ -446,19 +537,27 @@ limits {
 | Option | Standard | Bedeutung |
 |---|---:|---|
 | `scan.max_bytes` | 200 KiB | maximale HTML-Rohmenge |
-| `scan.smart_chunk` | 50 KiB | Chunk-Grösse für schnelle Textsuche |
-| `scan.max_attachment_text` | 300 KiB | Textmenge pro Attachment |
 | `scan.max_attachment_magic` | 2 MiB | maximale Rohmenge für Magic-Prüfung |
 | `scan.image_tail_max` | 256 KiB | maximales Image-Tail-Carving |
-| `b64.min_len` | 200 | normale Mindestlänge für Base64-Kandidaten |
-| `b64.magic_min_len` | 40 | Mindestlänge für Magic-Prefix-Fast-Path |
-| `b64.max_candidates` | 6 | tatsächlich dekodierte Hauptkandidaten |
-| `b64.max_pool_candidates` | 32 | maximale Kandidaten im Priorisierungspool |
+| `b64.max_pool_candidates` | 32 | Kandidatenpool vor Priorisierung |
 | `decode.max_depth` | 3 | maximale rekursive Decode-Tiefe |
-| `decode.nested_max_candidates` | 3 | Kandidaten pro rekursiver Zwischenstufe |
 | `script.max_check` | 5 | regulär tief geprüfte Scripts |
-| `script.max_script_time_ms` | 80 ms | Script-Scan-Zeitbudget |
-| `script.deobfus_timeout_ms` | 50 ms | Deobfuskationsbudget |
+| `script.prescan_chunk` | 4 KiB | günstiger Vorscan pro Script |
+| `budget.max_runtime_ms` | 250 ms | globales Laufzeitbudget pro Nachricht |
+| `budget.max_total_bytes` | 4 MiB | globales Bytebudget |
+| `budget.max_decode_ops` | 24 | maximale Decode-Operationen |
+| `budget.max_container_ops` | 8 | maximale Container-Operationen |
+| `budget.max_scripts_prescanned` | 64 | maximale Anzahl Prescan-Scripts |
+| `budget.max_script_prescan_bytes` | 512 KiB | maximales Prescan-Bytebudget |
+| `zip.max_entries` | 256 | maximal ausgewertete ZIP-Einträge |
+| `zip.max_central_bytes` | 512 KiB | maximales Central-Directory-Budget |
+| `zip.max_total_uncompressed` | 64 MiB | Gesamtgrenze laut ZIP-Metadaten |
+| `zip.max_entry_uncompressed` | 16 MiB | Grenze pro ZIP-Mitglied |
+| `zip.max_stored_extract` | 512 KiB | maximale direkte Stored-Extraktion |
+| `zip.high_ratio` | 100 | Schwelle für auffälliges Kompressionsverhältnis |
+| `crypto.max_input_bytes` | 64 KiB | maximales Payloadmaterial für XOR/RC4 |
+| `crypto.max_key_bytes` | 64 | maximale statische Schlüssellänge |
+| `crypto.max_candidates` | 4 | maximale Crypto-Kandidaten |
 
 ---
 
@@ -798,10 +897,16 @@ Das Modul verwendet mehrere Schutzmechanismen:
 - Smart-Chunks für grosse Inhalte
 - Script-Längenbegrenzung
 - Gesamtbudget für Script-Scans
+- **globales Nachrichten-Laufzeitbudget**
+- **globales Bytebudget**
+- **Decode- und Container-Operationsbudgets**
+- Script-Prescan-Limits
 - Deobfuskations-Zeitbudget
 - Base64-Kandidatenlimit
 - Kandidaten-Priorisierung
 - rekursive Decode-Tiefenbegrenzung
+- ZIP-Eintrags-, Grössen- und Extraktionslimits
+- Crypto-Input-, Key- und Kandidatenlimits
 - Attachment-Magic-Limit
 - Image-Tail-Limit
 - begrenzte Anzahl externer Scripts
@@ -810,6 +915,26 @@ Das Modul verwendet mehrere Schutzmechanismen:
 - Score-Caps
 
 Dadurch bleibt der Scanner auch bei grossen oder absichtlich problematischen Nachrichten kontrollierbar.
+
+### Budget- und Parser-Info-Reasons
+
+Wenn ein Schutzlimit erreicht wird, kann v4.6.0 unter anderem folgende Info-Reasons setzen:
+
+```text
+global_runtime_budget
+global_byte_budget
+global_decode_budget
+global_container_budget
+script_prescan_budget
+script_time_budget
+script_total_budget
+decode_depth_limit
+zip_parse_incomplete
+zip_high_compression_ratio
+zip_many_entries
+```
+
+Diese Gründe sind wichtig für Performance-Monitoring und die Bewertung, ob ein Scan wegen eines Limits nur teilweise durchgeführt wurde.
 
 ---
 
@@ -848,7 +973,36 @@ Nicht oder nur eingeschränkt umgesetzt sind:
 - System-Call-/Behavior-Analyse
 - vollständige Archivrekursion
 
-`image_smuggling_info` ist daher bewusst nur ein Hinweis-Modul. Das neue Image-Tail-Carving in `attachment_vectors` erkennt angehängte Inhalte, aber keine allgemeine Steganographie.
+`image_smuggling_info` ist daher bewusst nur ein Hinweis-Modul. Das Image-Tail-Carving in `attachment_vectors` erkennt angehängte Inhalte, aber keine allgemeine Steganographie.
+
+---
+
+## Test-Suite v4.6.0-r1
+
+Zum Modul gehört eine separate HTML-/Script-Pattern-Test-Suite:
+
+```text
+create_html_pattern_test_suite_v4_6_0_r1.ps1
+```
+
+Die Suite erzeugt **56 HTML-Testfälle** sowie CSV-/JSON-Manifeste. Sie deckt neben den bestehenden Pattern-Tests auch die neuen v4.6-Pfade ab, unter anderem:
+
+- Script-Prescan
+- Prescan-Budget
+- Nested Base64
+- hexadezimales `Uint8Array`
+- ZIP Executable / Script Member
+- ZIP Double Extension
+- ZIP Path Traversal
+- Nested ZIP
+- ZIP Encryption Flag
+- High Compression Ratio
+- ZIP mit vielen Einträgen
+- Stored PE im ZIP
+- konstante XOR→PE-Rekonstruktion
+- konstante RC4→PE-Rekonstruktion
+
+Die HTML-Suite ersetzt **keine EML-Suite**. Tests, die echte MIME-Part-Dateinamen, MIME-Typen, Newsletter-Header, Maps oder echte Attachment-Strukturen benötigen, sollten separat als EML-Testfälle aufgebaut werden.
 
 ---
 
@@ -871,19 +1025,15 @@ Besonders riskante Dateitypen wie CHM, HTA, LNK, OneNote und Script-Dateien soll
 
 ## Kurzfazit
 
-**v4.5.0** ist gegenüber v4.4.0 vor allem beim tatsächlichen Payload-Inhalt deutlich stärker.
+**v4.6.0** erweitert die v4.5-Linie vor allem dort, wo ein produktiver Gateway-Scanner besonders robust sein muss:
 
-Die wichtigsten Fortschritte sind:
+- globale Ressourcensteuerung pro Nachricht
+- günstiger Prescan vor teurer Script-Analyse
+- strukturierte ZIP-Auswertung statt reiner Magic-Erkennung
+- sicherheitsrelevante ZIP-Metadaten und Dateinamen
+- begrenzte Rekonstruktion statischer XOR-/RC4-Payloads
+- weiterhin harte Limits für Decode-, Container- und Script-Arbeit
 
-- bessere Base64-Priorisierung
-- Magic-Prefix-Fast-Path
-- rekursives Decoding
-- erweiterte Byte-Array-Rekonstruktion
-- zusätzliche Kompressionsformate
-- Attachment-Magic-Prüfung
-- Image-Tail-Carving
-- bessere Script-Priorisierung
+Die bestehenden Stärken aus v4.5.0 bleiben erhalten: Magic-Prefix-Priorisierung, rekursives Decoding, `Uint8Array`-Rekonstruktion, Attachment-Magic-Prüfung und Image-Tail-Carving.
 
-Damit bleibt HTML der zentrale Erkennungspfad, während Attachment- und Non-HTML-Vektoren wesentlich tiefer geprüft werden. Die Laufzeit wird weiterhin durch feste Scan-, Decode- und Script-Budgets begrenzt.
-
-Das Modul ist damit gut für einen **produktionsnahen Rspamd-Mail-Gateway-Betrieb** geeignet, sofern der Rollout zuerst im Testmodus erfolgt und False Positives mit realem Mailverkehr validiert werden.
+Damit ist v4.6.0 ein deutlich vollständigerer Stand für einen **produktionsnahen Rspamd-Mail-Gateway-Betrieb**, ohne den Scanner in Richtung unkontrollierter Sandbox- oder Vollforensik zu verschieben.
