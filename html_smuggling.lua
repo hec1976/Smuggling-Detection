@@ -1,5 +1,5 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.5.0
+-- HTML Smuggling Detection v4.6.0
 --
 -- Refactor und Erweiterungen seit v4.3.5:
 --
@@ -53,17 +53,21 @@
 -- 48. Image-Tail-Carving fuer PNG, JPEG, GIF und WebP
 -- 49. Script-Auswahl priorisiert Magic-Prefix-Payloads und prueft standardmaessig bis zu 5 Scripts
 -- 50. ZIP-Dateinamen werden auf ausfuehrbare oder scriptbasierte Inhalte geprueft
+-- 51. Globales Nachrichtenbudget fuer Laufzeit, Bytes, Decode- und Container-Operationen
+-- 52. Billiger Vorscan aller Inline-Scripts vor der begrenzten Tiefenanalyse
+-- 53. Echtes ZIP-Central-Directory-/Local-Header-Parsing mit sicherheitsrelevanten Metadaten
+-- 54. Begrenzte Rekonstruktion konstanter XOR- und RC4-Payloads
 
 -- Design:
 -- Die Struktur bleibt nah an v4.3.6d.
 -- HTML bleibt der Hauptpfad.
 -- Neue Attachment- und Zertifikats-Scanner ergaenzen den bestehenden Flow.
 -- Image Smuggling bleibt standardmaessig info_only.
--- v4.5.0 erweitert die Payload-Rekonstruktion und Inhaltsklassifizierung bei weiterhin begrenzten Laufzeitbudgets.
+-- v4.6.0 erweitert Ressourcensteuerung, Script-Vorscan, ZIP-Parsing und konstante Crypto-Rekonstruktion.
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.5.0"
+local VERSION = "4.6.0"
 
 -- =========================
 -- Config lesen
@@ -134,15 +138,38 @@ local LIMITS = {
     nested_max_candidates = 3,
   },
   script = {
-    max_check              = 5,
-    max_external           = 5,
-    max_vars               = 20,
-    smart_chunk            = 20000,
-    max_script_len         = 80000,
-    max_total_script_scan  = 120000,
-    max_script_time_ms     = 80.0,
-    deobfus_timeout_ms     = 50.0,
-    split_payload_min_vars = 6,
+    max_check                = 5,
+    max_external             = 5,
+    max_vars                 = 20,
+    smart_chunk              = 20000,
+    max_script_len           = 80000,
+    max_total_script_scan    = 120000,
+    max_script_time_ms       = 80.0,
+    deobfus_timeout_ms       = 50.0,
+    split_payload_min_vars   = 6,
+    prescan_chunk            = 4096,
+  },
+  budget = {
+    max_runtime_ms           = 250.0,
+    max_total_bytes          = 4 * 1024 * 1024,
+    max_decode_ops           = 24,
+    max_container_ops        = 8,
+    max_scripts_prescanned   = 64,
+    max_script_prescan_bytes = 512 * 1024,
+  },
+  zip = {
+    max_entries              = 256,
+    max_central_bytes        = 512 * 1024,
+    max_total_uncompressed   = 64 * 1024 * 1024,
+    max_entry_uncompressed   = 16 * 1024 * 1024,
+    max_stored_extract       = 512 * 1024,
+    max_member_name          = 1024,
+    high_ratio               = 100,
+  },
+  crypto = {
+    max_input_bytes          = 64 * 1024,
+    max_key_bytes            = 64,
+    max_candidates           = 4,
   },
   obfus = {
     min_frag_len             = 4,
@@ -260,6 +287,7 @@ local REASON_MODULE_MAP = {
   b64_joined_parts        = "js_smuggling",
   virtual_b64_candidates  = "js_smuggling",
   b64_magic_prefix       = "js_smuggling",
+  script_prescan_payload = "js_smuggling",
   nested_base64_payload  = "decoded_payload",
   array_index_atob        = "js_smuggling",
   array_index_blob        = "js_smuggling",
@@ -301,6 +329,8 @@ local REASON_MODULE_MAP = {
   percent_encoded_payload = "obfuscation",
   hex_array_payload      = "obfuscation",
   blob_concat_payload    = "obfuscation",
+  xor_constant_payload   = "obfuscation",
+  rc4_constant_payload   = "obfuscation",
 
   dec_pe               = "decoded_payload",
   dec_wasm             = "decoded_payload",
@@ -315,7 +345,15 @@ local REASON_MODULE_MAP = {
   dec_vhdx             = "decoded_payload",
   dec_ole              = "decoded_payload",
   dec_compressed       = "decoded_payload",
-  zip_executable_member = "decoded_payload",
+  zip_executable_member   = "decoded_payload",
+  zip_script_member       = "decoded_payload",
+  zip_nested_archive      = "decoded_payload",
+  zip_encrypted           = "decoded_payload",
+  zip_double_extension    = "decoded_payload",
+  zip_path_traversal      = "decoded_payload",
+  zip_high_compression_ratio = "decoded_payload",
+  zip_many_entries        = "decoded_payload",
+  zip_stored_payload      = "decoded_payload",
   dec_script           = "decoded_payload",
 
   uint8array_payload   = "uint8array",
@@ -445,6 +483,14 @@ local DEFAULT_REASON_POLICY = {
 
   dec_script           = { class = "SCRIPT_HARD" },
   zip_executable_member = { class = "SCRIPT_HARD" },
+  zip_script_member     = { class = "SCRIPT_HARD" },
+  zip_double_extension  = { class = "SCRIPT_HARD" },
+  zip_path_traversal    = { class = "SCRIPT_HARD" },
+  zip_stored_payload    = { class = "CONTAINER" },
+  zip_nested_archive    = { class = "BONUS_SOFT", bonus_module = "attachment_vectors" },
+  zip_encrypted         = { class = "BONUS_SOFT", bonus_module = "attachment_vectors" },
+  zip_high_compression_ratio = { class = "BONUS_INFO" },
+  zip_many_entries      = { class = "BONUS_INFO" },
   att_hta_attachment   = { class = "SCRIPT_HARD" },
   att_script_attachment = { class = "SCRIPT_HARD" },
 
@@ -481,6 +527,8 @@ local DEFAULT_REASON_POLICY = {
   percent_encoded_payload  = { class = "OBFUSCATION" },
   hex_array_payload        = { class = "OBFUSCATION" },
   blob_concat_payload      = { class = "OBFUSCATION" },
+  xor_constant_payload     = { class = "OBFUSCATION" },
+  rc4_constant_payload     = { class = "OBFUSCATION" },
 
   webcrypto_api              = { class = "SUSPICIOUS_API" },
   serviceworker_api          = { class = "SUSPICIOUS_API" },
@@ -538,6 +586,7 @@ local DEFAULT_REASON_POLICY = {
   b64_joined_parts        = { class = "JS_SMUGGLING" },
   virtual_b64_candidates  = { class = "JS_SMUGGLING" },
   b64_magic_prefix       = { class = "JS_SMUGGLING" },
+  script_prescan_payload = { class = "JS_SMUGGLING" },
   nested_base64_payload  = { class = "JS_SMUGGLING" },
   array_index_atob        = { class = "JS_SMUGGLING" },
   array_index_blob        = { class = "JS_SMUGGLING" },
@@ -594,6 +643,12 @@ local DEFAULT_REASON_POLICY = {
   min_score                     = { class = "INFO" },
   critical_boost                = { class = "INFO" },
   single_sniff_pe               = { class = "INFO" },
+  global_runtime_budget          = { class = "INFO" },
+  global_byte_budget             = { class = "INFO" },
+  global_decode_budget           = { class = "INFO" },
+  global_container_budget        = { class = "INFO" },
+  script_prescan_budget          = { class = "INFO" },
+  zip_parse_incomplete           = { class = "INFO" },
 }
 
 -- =========================
@@ -681,7 +736,16 @@ local LSCAN   = LIMITS.scan
 local LB64    = LIMITS.b64
 local LDEC    = LIMITS.decode
 local LSCRIPT = LIMITS.script
+local LBUDGET = LIMITS.budget
+local LZIP    = LIMITS.zip
+local LCRYPTO = LIMITS.crypto
 local LOBFUS  = LIMITS.obfus
+local V46 = {
+  ZIP_BENIGN_COVER = { pdf = true, doc = true, docx = true, xls = true, xlsx = true,
+    ppt = true, pptx = true, jpg = true, jpeg = true, png = true, gif = true, txt = true },
+  ZIP_DANGEROUS_FINAL = { exe = true, dll = true, scr = true, lnk = true, hta = true,
+    js = true, jse = true, vbs = true, vbe = true, ps1 = true, bat = true, cmd = true },
+}
 
 -- =========================
 -- Modul Helpers
@@ -789,6 +853,12 @@ local function validate_config_or_raise()
   if (LSCRIPT.max_check or 0) < 1 then add_err("limits.script.max_check muss >= 1 sein") end
   if (LSCRIPT.max_script_len or 0) < 2000 then add_err("limits.script.max_script_len ist zu klein") end
   if (LSCRIPT.split_payload_min_vars or 0) < 2 then add_err("limits.script.split_payload_min_vars ist zu klein") end
+  if (LBUDGET.max_runtime_ms or 0) < 25 then add_err("limits.budget.max_runtime_ms ist zu klein") end
+  if (LBUDGET.max_total_bytes or 0) < (256 * 1024) then add_err("limits.budget.max_total_bytes ist zu klein") end
+  if (LBUDGET.max_decode_ops or 0) < 1 then add_err("limits.budget.max_decode_ops muss >= 1 sein") end
+  if (LBUDGET.max_container_ops or 0) < 1 then add_err("limits.budget.max_container_ops muss >= 1 sein") end
+  if (LZIP.max_entries or 0) < 1 then add_err("limits.zip.max_entries muss >= 1 sein") end
+  if (LCRYPTO.max_key_bytes or 0) < 1 then add_err("limits.crypto.max_key_bytes muss >= 1 sein") end
   if STRICT_WEIGHT_VALIDATION then
     for k, v in pairs(W or {}) do
       if tonumber(v) == nil then add_err("weight " .. tostring(k) .. " ist nicht numerisch")
@@ -1257,14 +1327,64 @@ function Detector.new(task)
   self.max_decode_depth = tonumber(LDEC.max_depth) or 3
   self.total_script_scanned = 0
   self.started_at = rspamd_util.get_time()
+  self.budget = {
+    bytes = 0,
+    decode_ops = 0,
+    container_ops = 0,
+    scripts_prescanned = 0,
+    prescan_bytes = 0,
+    exhausted = false,
+  }
   self.phase = {
     html_parts_seen = 0, html_parts_scanned = 0,
     attach_parts_seen = 0, attach_parts_scanned = 0,
-    script_blocks_seen = 0, script_blocks_scanned = 0,
+    script_blocks_seen = 0, script_blocks_scanned = 0, script_blocks_prescanned = 0,
     decode_candidates = 0, decode_success = 0, decode_fail = 0,
   }
   self.errors = {}
   return self
+end
+
+function Detector:budget_time_ok()
+  local max_ms = tonumber(LBUDGET.max_runtime_ms) or 250.0
+  if elapsed_ms(self.started_at) <= max_ms then return true end
+  self.budget.exhausted = true
+  self:add_info("global_runtime_budget")
+  return false
+end
+
+function Detector:consume_budget(kind, amount)
+  if self.budget.exhausted or not self:budget_time_ok() then return false end
+  amount = math.max(0, tonumber(amount) or 0)
+  if kind == "bytes" then
+    self.budget.bytes = self.budget.bytes + amount
+    if self.budget.bytes > (tonumber(LBUDGET.max_total_bytes) or (4 * 1024 * 1024)) then
+      self.budget.exhausted = true
+      self:add_info("global_byte_budget")
+      return false
+    end
+  elseif kind == "decode" then
+    self.budget.decode_ops = self.budget.decode_ops + math.max(1, amount)
+    if self.budget.decode_ops > (tonumber(LBUDGET.max_decode_ops) or 24) then
+      self:add_info("global_decode_budget")
+      return false
+    end
+  elseif kind == "container" then
+    self.budget.container_ops = self.budget.container_ops + math.max(1, amount)
+    if self.budget.container_ops > (tonumber(LBUDGET.max_container_ops) or 8) then
+      self:add_info("global_container_budget")
+      return false
+    end
+  elseif kind == "prescan_script" then
+    self.budget.scripts_prescanned = self.budget.scripts_prescanned + 1
+    self.budget.prescan_bytes = self.budget.prescan_bytes + amount
+    if self.budget.scripts_prescanned > (tonumber(LBUDGET.max_scripts_prescanned) or 64) or
+       self.budget.prescan_bytes > (tonumber(LBUDGET.max_script_prescan_bytes) or (512 * 1024)) then
+      self:add_info("script_prescan_budget")
+      return false
+    end
+  end
+  return true
 end
 
 function Detector:add_error(msg)
@@ -2803,6 +2923,282 @@ local scan_script_blocks
 local scan_decoded_payload_module
 local analyze_decoded_blob
 
+function V46.bit_is_set(value, bit_index)
+  value = tonumber(value) or 0
+  return (math.floor(value / (2 ^ bit_index)) % 2) == 1
+end
+
+function V46.find_zip_eocd(bin)
+  if not bin or #bin < 22 then return nil end
+  local start = math.max(1, #bin - 65557)
+  for p = #bin - 21, start, -1 do
+    if bin:sub(p, p + 3) == "PK\005\006" then return p end
+  end
+  return nil
+end
+
+function V46.classify_zip_member(ctx, entry)
+  local name = tostring(entry.name or ""):gsub("\\", "/")
+  local lc = name:lower()
+  local base = lc:match("([^/]+)$") or lc
+  local executable = base:match("%.exe$") or base:match("%.dll$") or base:match("%.scr$") or
+                     base:match("%.com$") or base:match("%.cpl$") or base:match("%.msi$")
+  local script = base:match("%.lnk$") or base:match("%.hta$") or base:match("%.js$") or
+                 base:match("%.jse$") or base:match("%.vbs$") or base:match("%.vbe$") or
+                 base:match("%.ps1$") or base:match("%.wsf$") or base:match("%.bat$") or
+                 base:match("%.cmd$") or base:match("%.chm$")
+  local nested = base:match("%.zip$") or base:match("%.rar$") or base:match("%.7z$") or
+                 base:match("%.iso$") or base:match("%.img$") or base:match("%.vhdx?$") or
+                 base:match("%.gz$") or base:match("%.bz2$") or base:match("%.xz$") or base:match("%.zst$")
+  local first_ext, final_ext = base:match("%.([^.]+)%.([^.]+)$")
+  local double_ext = first_ext and final_ext and V46.ZIP_BENIGN_COVER[first_ext] and V46.ZIP_DANGEROUS_FINAL[final_ext]
+  if executable then ctx:add_module_reason("decoded_payload", "zip_executable_member") end
+  if script then ctx:add_module_reason("decoded_payload", "zip_script_member") end
+  if nested then ctx:add_module_reason("decoded_payload", "zip_nested_archive") end
+  if double_ext then ctx:add_module_reason("decoded_payload", "zip_double_extension") end
+  if lc:find("../", 1, true) or lc:find("..\\", 1, true) or lc:match("^/") or lc:match("^[a-z]:/") then
+    ctx:add_module_reason("decoded_payload", "zip_path_traversal")
+  end
+  if entry.encrypted then ctx:add_module_reason("decoded_payload", "zip_encrypted") end
+  local comp, uncomp = tonumber(entry.compressed) or 0, tonumber(entry.uncompressed) or 0
+  if comp > 0 and uncomp > (1024 * 1024) and (uncomp / comp) >= (tonumber(LZIP.high_ratio) or 100) then
+    ctx:add_info("zip_high_compression_ratio")
+  end
+end
+
+function V46.parse_zip_entries(bin)
+  local entries, meta = {}, { complete = false, central = false, total_uncompressed = 0 }
+  if not bin or #bin < 30 then return entries, meta end
+  local max_entries = tonumber(LZIP.max_entries) or 256
+  local max_name = tonumber(LZIP.max_member_name) or 1024
+  local eocd = V46.find_zip_eocd(bin)
+  if eocd then
+    local zoff = eocd - 1
+    local total = le_u16(bin, zoff + 10) or 0
+    local central_size = le_u32(bin, zoff + 12) or 0
+    local central_off = le_u32(bin, zoff + 16) or 0
+    if total > max_entries then total = max_entries; meta.too_many = true end
+    if central_size <= (tonumber(LZIP.max_central_bytes) or (512 * 1024)) and central_off + central_size <= #bin then
+      local pos = central_off + 1
+      meta.central = true
+      for _ = 1, total do
+        if bin:sub(pos, pos + 3) ~= "PK\001\002" then break end
+        local off = pos - 1
+        local flags = le_u16(bin, off + 8) or 0
+        local method = le_u16(bin, off + 10) or 0
+        local compressed = le_u32(bin, off + 20) or 0
+        local uncompressed = le_u32(bin, off + 24) or 0
+        local name_len = le_u16(bin, off + 28) or 0
+        local extra_len = le_u16(bin, off + 30) or 0
+        local comment_len = le_u16(bin, off + 32) or 0
+        local local_off = le_u32(bin, off + 42) or 0
+        if name_len > max_name or pos + 45 + name_len + extra_len + comment_len > #bin then break end
+        local name = bin:sub(pos + 46, pos + 45 + name_len)
+        local entry = { name = name, flags = flags, method = method, compressed = compressed,
+          uncompressed = uncompressed, local_offset = local_off, encrypted = V46.bit_is_set(flags, 0) }
+        entries[#entries + 1] = entry
+        meta.total_uncompressed = meta.total_uncompressed + uncompressed
+        pos = pos + 46 + name_len + extra_len + comment_len
+      end
+      meta.complete = (#entries > 0)
+    end
+  end
+  if #entries == 0 then
+    local pos, loops = 1, 0
+    while #entries < max_entries do
+      local p = bin:find("PK\003\004", pos, true)
+      if not p then break end
+      loops = loops + 1
+      if loops > max_entries then break end
+      local off = p - 1
+      local flags = le_u16(bin, off + 6) or 0
+      local method = le_u16(bin, off + 8) or 0
+      local compressed = le_u32(bin, off + 18) or 0
+      local uncompressed = le_u32(bin, off + 22) or 0
+      local name_len = le_u16(bin, off + 26) or 0
+      local extra_len = le_u16(bin, off + 28) or 0
+      if name_len <= 0 or name_len > max_name or p + 29 + name_len + extra_len > #bin then break end
+      local name = bin:sub(p + 30, p + 29 + name_len)
+      local data_start = p + 30 + name_len + extra_len
+      local entry = { name = name, flags = flags, method = method, compressed = compressed,
+        uncompressed = uncompressed, local_offset = off, data_start = data_start, encrypted = V46.bit_is_set(flags, 0) }
+      if method == 0 and not entry.encrypted and compressed > 0 and compressed <= (tonumber(LZIP.max_stored_extract) or (512 * 1024)) and data_start + compressed - 1 <= #bin then
+        entry.stored_data = bin:sub(data_start, data_start + compressed - 1)
+      end
+      entries[#entries + 1] = entry
+      meta.total_uncompressed = meta.total_uncompressed + uncompressed
+      if compressed > 0 and not V46.bit_is_set(flags, 3) then pos = data_start + compressed else pos = data_start + 1 end
+    end
+  else
+    for _, entry in ipairs(entries) do
+      if entry.method == 0 and not entry.encrypted and entry.compressed > 0 and entry.compressed <= (tonumber(LZIP.max_stored_extract) or (512 * 1024)) then
+        local lp = entry.local_offset + 1
+        if bin:sub(lp, lp + 3) == "PK\003\004" then
+          local loff = lp - 1
+          local nlen = le_u16(bin, loff + 26) or 0
+          local xlen = le_u16(bin, loff + 28) or 0
+          local ds = lp + 30 + nlen + xlen
+          if ds + entry.compressed - 1 <= #bin then entry.stored_data = bin:sub(ds, ds + entry.compressed - 1) end
+        end
+      end
+    end
+  end
+  return entries, meta
+end
+
+function V46.analyze_zip_container(ctx, bin)
+  if not ctx:consume_budget("container", 1) then return end
+  local entries, meta = V46.parse_zip_entries(bin)
+  if meta.too_many or #entries >= (tonumber(LZIP.max_entries) or 256) then ctx:add_info("zip_many_entries") end
+  if not meta.complete then ctx:add_info("zip_parse_incomplete") end
+  if meta.total_uncompressed > (tonumber(LZIP.max_total_uncompressed) or (64 * 1024 * 1024)) then
+    ctx:add_info("zip_high_compression_ratio")
+  end
+  local stored_checked = 0
+  for _, entry in ipairs(entries) do
+    V46.classify_zip_member(ctx, entry)
+    if (tonumber(entry.uncompressed) or 0) > (tonumber(LZIP.max_entry_uncompressed) or (16 * 1024 * 1024)) then
+      ctx:add_info("zip_high_compression_ratio")
+    end
+    if entry.stored_data and stored_checked < 2 and ctx.decode_depth < ctx.max_decode_depth then
+      local kind = sniff_decoded(entry.stored_data)
+      if kind and kind ~= "BINARY" and kind ~= "ZIP" then
+        ctx:add_module_reason("decoded_payload", "zip_stored_payload")
+        stored_checked = stored_checked + 1
+        ctx.decode_depth = ctx.decode_depth + 1
+        analyze_decoded_blob(ctx, entry.stored_data)
+        ctx.decode_depth = ctx.decode_depth - 1
+      end
+    end
+    if not ctx:budget_time_ok() then break end
+  end
+end
+
+function V46.portable_bxor(a, b)
+  a, b = math.floor(tonumber(a) or 0) % 256, math.floor(tonumber(b) or 0) % 256
+  if bit32 and bit32.bxor then return bit32.bxor(a, b) end
+  if bit and bit.bxor then return bit.bxor(a, b) end
+  local r, p = 0, 1
+  for _ = 1, 8 do
+    local aa, bb = a % 2, b % 2
+    if aa ~= bb then r = r + p end
+    a, b, p = math.floor(a / 2), math.floor(b / 2), p * 2
+  end
+  return r
+end
+
+function V46.xor_bytes(data, key)
+  if not data or not key or #key == 0 then return nil end
+  local maxb = tonumber(LCRYPTO.max_input_bytes) or (64 * 1024)
+  if #data > maxb then data = data:sub(1, maxb) end
+  local out = {}
+  for i = 1, #data do out[i] = string.char(V46.portable_bxor(data:byte(i), key:byte(((i - 1) % #key) + 1))) end
+  return table.concat(out)
+end
+
+function V46.rc4_crypt(data, key)
+  if not data or not key or #key == 0 or #key > (tonumber(LCRYPTO.max_key_bytes) or 64) then return nil end
+  local maxb = tonumber(LCRYPTO.max_input_bytes) or (64 * 1024)
+  if #data > maxb then data = data:sub(1, maxb) end
+  local sbox = {}
+  for i = 0, 255 do sbox[i] = i end
+  local j = 0
+  for i = 0, 255 do
+    j = (j + sbox[i] + key:byte((i % #key) + 1)) % 256
+    sbox[i], sbox[j] = sbox[j], sbox[i]
+  end
+  local out, i = {}, 0
+  j = 0
+  for n = 1, #data do
+    i = (i + 1) % 256
+    j = (j + sbox[i]) % 256
+    sbox[i], sbox[j] = sbox[j], sbox[i]
+    local k = sbox[(sbox[i] + sbox[j]) % 256]
+    out[n] = string.char(V46.portable_bxor(data:byte(n), k))
+  end
+  return table.concat(out)
+end
+
+function V46.collect_crypto_constants(ctx, script)
+  local arrays, strings, numbers = {}, {}, {}
+  local maxc = tonumber(LCRYPTO.max_candidates) or 4
+  for name, body in (script or ""):gmatch("([%w_]+)%s*=%s*%[([^%]]+)%]") do
+    if #arrays >= maxc then break end
+    local data = parse_byte_array(body, LCRYPTO.max_input_bytes)
+    if data and #data >= 4 then arrays[#arrays + 1] = { name = name, data = data } end
+  end
+  for _, kw in ipairs({"const", "let", "var"}) do
+    for name, value in script:gmatch(kw .. "%s+([%w_]+)%s*=%s*'([^']*)'") do
+      if #strings < (maxc * 2) then strings[#strings + 1] = { name = name, value = value } end
+    end
+    for name, value in script:gmatch(kw .. '%s+([%w_]+)%s*=%s*"([^"]*)"') do
+      if #strings < (maxc * 2) then strings[#strings + 1] = { name = name, value = value } end
+    end
+    for name, hx in script:gmatch(kw .. "%s+([%w_]+)%s*=%s*0[xX](%x+)") do numbers[name] = tonumber(hx, 16) end
+    for name, num in script:gmatch(kw .. "%s+([%w_]+)%s*=%s*(%d+)") do if not numbers[name] then numbers[name] = tonumber(num) end end
+  end
+  local data_candidates = {}
+  for _, item in ipairs(arrays) do data_candidates[#data_candidates + 1] = item end
+  for _, item in ipairs(strings) do
+    local compact = item.value:gsub("%s+", "")
+    if #compact >= (LB64.magic_min_len or 40) and is_frag_base64ish(compact) and ctx:consume_budget("decode", 1) then
+      local decoded = safe_decode_base64(ctx.task, normalize_b64(compact), LCRYPTO.max_input_bytes)
+      if decoded and #decoded >= 4 then data_candidates[#data_candidates + 1] = { name = item.name, data = decoded } end
+    end
+  end
+  return data_candidates, strings, numbers
+end
+
+function V46.reconstruct_constant_crypto(ctx, script)
+  local results = {}
+  if not script or #script < 40 or not ctx:budget_time_ok() then return results end
+  local lc = script:lower()
+  local has_sink = lc:find("createobjecturl", 1, true) or lc:find("blob", 1, true) or lc:find("eval", 1, true) or
+                   lc:find("fromcharcode", 1, true) or lc:find("textdecoder", 1, true) or lc:find("uint8array", 1, true)
+  if not has_sink then return results end
+  local data_candidates, strings, numbers = V46.collect_crypto_constants(ctx, script)
+  local maxc = tonumber(LCRYPTO.max_candidates) or 4
+  local seen = {}
+  local function add_result(data, reason)
+    if not data or seen[data] then return end
+    local kind = sniff_decoded(data)
+    if kind and kind ~= "BINARY" and ctx:consume_budget("bytes", #data) then
+      seen[data] = true
+      results[#results + 1] = { data = data, reason = reason, kind = kind }
+    end
+  end
+  if script:find("^", 1, true) then
+    local keys = {}
+    for hx in script:gmatch("%^%s*0[xX](%x+)") do keys[#keys + 1] = string.char((tonumber(hx, 16) or 0) % 256) end
+    for num in script:gmatch("%^%s*(%d+)") do keys[#keys + 1] = string.char((tonumber(num) or 0) % 256) end
+    for name, value in pairs(numbers) do if script:find("%^%s*" .. name, 1, false) then keys[#keys + 1] = string.char((value or 0) % 256) end end
+    for _, key_item in ipairs(strings) do if #key_item.value > 0 and #key_item.value <= (tonumber(LCRYPTO.max_key_bytes) or 64) and script:find("%^%s*" .. key_item.name, 1, false) then keys[#keys + 1] = key_item.value end end
+    for _, cand in ipairs(data_candidates) do
+      for _, key in ipairs(keys) do
+        if #results >= maxc or not ctx:consume_budget("decode", 1) then break end
+        add_result(V46.xor_bytes(cand.data, key), "xor_constant_payload")
+      end
+      if #results >= maxc then break end
+    end
+  end
+  local has_rc4 = lc:find("rc4", 1, true) or lc:find("prga", 1, true) or lc:find("ksa", 1, true) or
+                  (lc:find("s%[i%]", 1, false) and lc:find("s%[j%]", 1, false) and script:find("^", 1, true))
+  if has_rc4 then
+    local keys = {}
+    for _, item in ipairs(strings) do
+      if #item.value > 0 and #item.value <= (tonumber(LCRYPTO.max_key_bytes) or 64) and not is_base64ish(item.value) then keys[#keys + 1] = item.value end
+    end
+    for _, cand in ipairs(data_candidates) do
+      for _, key in ipairs(keys) do
+        if #results >= maxc or not ctx:consume_budget("decode", 1) then break end
+        add_result(V46.rc4_crypt(cand.data, key), "rc4_constant_payload")
+      end
+      if #results >= maxc then break end
+    end
+  end
+  return results
+end
+
 local function scan_decoded_html_blob(ctx, decoded_html)
   local raw_html = clamp_html_size(normalize_text(decoded_html))
   if raw_html == "" then return end
@@ -2961,13 +3357,7 @@ analyze_decoded_blob = function(ctx, decoded)
 
   if kind == "ZIP" then
     add_decoded("decoded_payload", "dec_zip", "ZIP")
-    local zl = decoded:sub(1, 200000):lower()
-    if zl:find("%.exe", 1, false) or zl:find("%.dll", 1, false) or zl:find("%.lnk", 1, false) or
-       zl:find("%.hta", 1, false) or zl:find("%.jse", 1, false) or zl:find("%.vbs", 1, false) or
-       zl:find("%.ps1", 1, false) or zl:find("%.chm", 1, false) or zl:find("%.iso", 1, false) or
-       zl:find("%.img", 1, false) or zl:find("%.vhd", 1, false) then
-      ctx:add_module_reason("decoded_payload", "zip_executable_member")
-    end
+    V46.analyze_zip_container(ctx, decoded)
     return
   end
 
@@ -3078,8 +3468,9 @@ analyze_decoded_blob = function(ctx, decoded)
     local nested = extract_b64_candidates(decoded, tonumber(LDEC.nested_max_candidates) or 3)
     for _, cand in ipairs(nested) do
       local nb = normalize_b64(cand)
+      if not ctx:consume_budget("decode", 1) then break end
       local inner = safe_decode_base64(ctx.task, nb, LDEC.max_bytes)
-      if inner and #inner > 0 and inner ~= decoded then
+      if inner and #inner > 0 and inner ~= decoded and ctx:consume_budget("bytes", #inner) then
         ctx:add_module_reason("decoded_payload", "nested_base64_payload")
         ctx.decode_depth = ctx.decode_depth + 1
         analyze_decoded_blob(ctx, inner)
@@ -3103,6 +3494,7 @@ collect_script_meta = function(script_view)
   local maybe_web3   = sl:find("ethers", 1, true) ~= nil or sl:find("web3", 1, true) ~= nil or sl:find("ethereum", 1, true) ~= nil
   local maybe_css    = sl:find("getcomputedstyle", 1, true) ~= nil
   local maybe_rc4    = sl:find("rc4", 1, true) ~= nil or sl:find("ksa", 1, true) ~= nil or sl:find("prga", 1, true) ~= nil or (sl:find("decrypt", 1, true) ~= nil and sl:find("key", 1, true) ~= nil)
+  local maybe_xor    = sl:find("^", 1, true) ~= nil and (sl:find("uint8array", 1, true) ~= nil or sl:find("fromcharcode", 1, true) ~= nil or sl:find("decrypt", 1, true) ~= nil or maybe_rc4)
   local maybe_escape = sl:find("\\x%x%x", 1, false) ~= nil or sl:find("\\u00%x%x", 1, false) ~= nil
   local maybe_fromchar = sl:find("fromcharcode%s*%(", 1, false) ~= nil
   local maybe_percent = sl:find("decodeuricomponent%s*%(", 1, false) ~= nil or sl:find("unescape%s*%(", 1, false) ~= nil
@@ -3129,14 +3521,15 @@ collect_script_meta = function(script_view)
     maybe_web3 = maybe_web3,
     maybe_css = maybe_css,
     maybe_rc4 = maybe_rc4,
+    maybe_xor = maybe_xor,
     maybe_array_join = maybe_array_join,
     maybe_escape = maybe_escape,
     maybe_fromchar = maybe_fromchar,
     maybe_percent = maybe_percent,
     maybe_hex_array = maybe_hex_array,
     maybe_blob_parts = maybe_blob_parts,
-    is_interesting = (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or maybe_wasm or maybe_web3 or maybe_css or maybe_rc4 or maybe_array_join or reconstructable),
-    allow_decode_path = (maybe_b64 or maybe_concat or maybe_obfus or maybe_array_join or reconstructable),
+    is_interesting = (maybe_b64 or maybe_concat or maybe_obfus or maybe_uint8 or maybe_hex or maybe_wasm or maybe_web3 or maybe_css or maybe_rc4 or maybe_xor or maybe_array_join or reconstructable),
+    allow_decode_path = (maybe_b64 or maybe_concat or maybe_obfus or maybe_rc4 or maybe_xor or maybe_array_join or reconstructable),
   }
 end
 
@@ -3222,6 +3615,14 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
     end
   end
 
+  local crypto_candidates = V46.reconstruct_constant_crypto(ctx, script_raw)
+  for _, item in ipairs(crypto_candidates or {}) do
+    ctx:add_module_reason("obfuscation", item.reason)
+    analyze_decoded_blob(ctx, item.data)
+    if has_any_critical_kind(ctx) or ctx:has_reason("dec_script") then break end
+  end
+  if has_any_critical_kind(ctx) or ctx:has_reason("dec_script") then return end
+
   if not cands or #cands == 0 then
     decode_dbg(ctx.task, "HTML_SMUGGLING_DBG || no cands after virtuals")
     return
@@ -3273,8 +3674,10 @@ scan_decoded_payload_module = function(ctx, script_raw, meta)
       i, #cand, #(nb or "")
     )
     if nb and #nb >= 40 then
+      if not ctx:consume_budget("decode", 1) then break end
       local decoded = safe_decode_base64(ctx.task, nb, LDEC.max_bytes)
       if decoded and #decoded > 0 then
+        if not ctx:consume_budget("bytes", #decoded) then break end
         ctx.phase.decode_success = ctx.phase.decode_success + 1
         local first4 = ""
         if type(decoded) == "string" and #decoded > 0 then
@@ -3359,7 +3762,7 @@ end
 
 local function score_script_interest(entry)
   if not entry.is_inline or #entry.body < (THRESHOLDS.script_min_len or 20) then return 0 end
-  local lc, score = entry.lc_body, 0
+  local lc, score = entry.lc_body, tonumber(entry.prescan_score) or 0
   if lc:find("atob%s*%(", 1, false) then score = score + 4 end
   if lc:find("createobjecturl", 1, true) then score = score + 4 end
   if lc:find("uint8array", 1, true) then score = score + 3 end
@@ -3379,6 +3782,42 @@ local function score_script_interest(entry)
   return score
 end
 
+function V46.cheap_prescan_script(ctx, entry)
+  if not entry.is_inline or #entry.body < (THRESHOLDS.script_min_len or 20) then return false end
+  local chunk_size = tonumber(LSCRIPT.prescan_chunk) or 4096
+  local scan = smart_text_scan(entry.body, chunk_size)
+  if not ctx:consume_budget("prescan_script", #scan) then return false end
+  ctx.phase.script_blocks_prescanned = ctx.phase.script_blocks_prescanned + 1
+  local lc, score, force = scan:lower(), 0, false
+  if lc:find("atob", 1, true) then score = score + 4 end
+  if lc:find("createobjecturl", 1, true) then score = score + 5 end
+  if lc:find("uint8array", 1, true) then score = score + 4 end
+  if lc:find("fromcharcode", 1, true) or lc:find("textdecoder", 1, true) then score = score + 3 end
+  if lc:find("new%s+blob", 1, false) then score = score + 4 end
+  if scan:find("^", 1, true) and (lc:find("decrypt", 1, true) or lc:find("rc4", 1, true) or lc:find("fromcharcode", 1, true)) then score = score + 5 end
+  for raw in scan:gmatch("[A-Za-z0-9%+/_=-]+") do
+    if #raw >= (LB64.magic_min_len or 40) and base64_magic_hint(raw) then force = true; score = score + 1000; break end
+  end
+  if lc:find("0x4d%s*,%s*0x5a", 1, false) or lc:find("77%s*,%s*90", 1, false) or
+     lc:find("0x50%s*,%s*0x4b%s*,%s*0x03%s*,%s*0x04", 1, false) then
+    force = true; score = score + 1000
+  end
+  entry.prescan_score = score
+  entry.prescan_force = force
+  if force then ctx:add_module_reason("js_smuggling", "script_prescan_payload") end
+  return force
+end
+
+function V46.prescan_all_script_entries(ctx, entries)
+  local forced = false
+  for _, entry in ipairs(entries or {}) do
+    if not ctx:budget_time_ok() then break end
+    if V46.cheap_prescan_script(ctx, entry) then forced = true end
+    if ctx:has_info("script_prescan_budget") then break end
+  end
+  return forced
+end
+
 local function select_top_script_entries(entries, max_check)
   max_check = tonumber(max_check) or 5
   local inline = {}
@@ -3394,7 +3833,7 @@ local function select_top_script_entries(entries, max_check)
   end)
   local selected, hard_extra = {}, 0
   for _, entry in ipairs(inline) do
-    local is_magic = entry.interest_score >= 100
+    local is_magic = entry.interest_score >= 100 or entry.prescan_force == true
     if #selected < max_check or (is_magic and hard_extra < 2) then
       selected[#selected + 1] = entry
       if #selected > max_check then hard_extra = hard_extra + 1 end
@@ -3411,6 +3850,7 @@ local function is_script_budget_exceeded(ctx, script_loop_start)
 end
 
 local function analyze_script_block(ctx, html_view, entry)
+  if not ctx:budget_time_ok() then return end
   local script = entry.body or ""
   if #script < (THRESHOLDS.script_min_len or 20) then return end
   local script_view = build_script_views(script)
@@ -3434,8 +3874,10 @@ local function analyze_script_block(ctx, html_view, entry)
 end
 
 scan_script_blocks = function(ctx, html_view, script_entries)
-  if not ctx.deep_scan or not Policy.should_deep_scan_scripts(ctx, html_view) then return end
-  local selected = select_top_script_entries(script_entries, LSCRIPT.max_check or 3)
+  if not ctx.deep_scan then return end
+  local prescan_forced = V46.prescan_all_script_entries(ctx, script_entries)
+  if not prescan_forced and not Policy.should_deep_scan_scripts(ctx, html_view) then return end
+  local selected = select_top_script_entries(script_entries, LSCRIPT.max_check or 5)
   local script_loop_start = rspamd_util.get_time()
   for _, entry in ipairs(selected) do
     ctx.phase.script_blocks_seen = ctx.phase.script_blocks_seen + 1
@@ -3446,7 +3888,7 @@ scan_script_blocks = function(ctx, html_view, script_entries)
 	  ctx:add_error("analyze_script_block failed: " .. emsg)
 	  rspamd_logger.errx(ctx.task, "HTML_SMUGGLING_SCRIPT_ERROR || " .. emsg)
 	end
-    if has_any_critical_kind(ctx) then break end
+    if has_any_critical_kind(ctx) or not ctx:budget_time_ok() then break end
   end
 end
 
@@ -3536,6 +3978,7 @@ local function scan_attachment_vectors_module(ctx, part)
   local raw   = part_get_content_text(part, LSCAN.max_attachment_magic)
   local text  = lower_limit_text(raw, LSCAN.max_attachment_text)
   if fname == "" and ctype == "" and raw == "" then return end
+  if raw ~= "" and not ctx:consume_budget("bytes", #raw) then return end
   ctx.phase.attach_parts_seen = ctx.phase.attach_parts_seen + 1
 
   local mod = "attachment_vectors"
@@ -3606,7 +4049,8 @@ local function scan_attachment_vectors_module(ctx, part)
       analyze_decoded_blob(ctx, raw)
       hit = true
     elseif actual_kind and expected_kind and actual_kind == expected_kind then
-      if apply_content_kind(ctx, actual_kind) then hit = true end
+      if actual_kind == "ZIP" then analyze_decoded_blob(ctx, raw); hit = true
+      elseif apply_content_kind(ctx, actual_kind) then hit = true end
     elseif actual_kind and is_hard_binary_kind(actual_kind) then
       ctx:add_module_reason(mod, "attachment_magic_mismatch")
       if apply_content_kind(ctx, actual_kind) then hit = true end
@@ -3682,6 +4126,7 @@ local function scan_html_part(ctx, part)
   local ok_scan, err = pcall(function()
     local raw_html = normalize_text(content)
     raw_html = clamp_html_size(raw_html)
+    if not ctx:consume_budget("bytes", #raw_html) then return end
 
     local fname = part_get_filename_lc(part)
     local ctype = part_get_type_lc(part)
@@ -3808,10 +4253,14 @@ local function build_reason_summary(reasons)
   if reasons["dec_zip"] or reasons["zip_uint8array"] or reasons["dec_iso"] or reasons["dec_lnk"] or reasons["dec_vhdx"] or
      reasons["dec_ole"] or reasons["dec_cab"] or reasons["dec_7zip"] or reasons["dec_rar"] or
      reasons["dec_compressed"] or reasons["attachment_magic_mismatch"] or reasons["image_appended_payload"] or
+     reasons["zip_nested_archive"] or reasons["zip_encrypted"] or reasons["zip_stored_payload"] or
      reasons["att_chm_attachment"] or reasons["att_onenote_attachment"] or
      reasons["att_office_macro_container"] or reasons["att_lnk_attachment"] then
     add_tag("[CONTAINER]")
   end
+
+  if reasons["zip_executable_member"] or reasons["zip_script_member"] or reasons["zip_double_extension"] or
+     reasons["zip_path_traversal"] then add_tag("[ZIP_RISK]") end
 
   if reasons["dec_script"] or reasons["dec_js"] or reasons["dec_html"] or
      reasons["att_hta_attachment"] or reasons["att_script_attachment"] then
@@ -3821,13 +4270,14 @@ local function build_reason_summary(reasons)
   if reasons["atob_obfuscated"] or reasons["obfus_api"] or reasons["polymorphic_obfuscation"] or
      reasons["hex_array"] or reasons["fromcharcode_api"] or reasons["array_join_concat"] or
      reasons["escaped_string_payload"] or reasons["fromcharcode_payload"] or reasons["percent_encoded_payload"] or
-     reasons["hex_array_payload"] or reasons["blob_concat_payload"] then
+     reasons["hex_array_payload"] or reasons["blob_concat_payload"] or reasons["xor_constant_payload"] or
+     reasons["rc4_constant_payload"] then
     add_tag("[VERSCHLEIERT]")
   end
 
   if reasons["atob"] or reasons["blob"] or reasons["createObjectURL"] or reasons["fetch"] or
      reasons["split_payload"] or reasons["delayed_execution"] or reasons["uint8array_payload"] or
-     reasons["b64_magic_prefix"] or reasons["nested_base64_payload"] or
+     reasons["b64_magic_prefix"] or reasons["script_prescan_payload"] or reasons["nested_base64_payload"] or
      reasons["att_svg_smuggling_context"] or reasons["b64_joined_parts"] or reasons["virtual_b64_candidates"] then
     add_tag("[JS_SMUGGLING]")
   end
@@ -3940,8 +4390,8 @@ local function log_result(ctx, summary, det_s, info_s)
     local dur_ms = elapsed_ms(ctx.started_at)
     if ENABLE_PHASE_DEBUG then
       rspamd_logger.infox(ctx.task, string.format(
-        "HTML_SMUGGLING_PHASE_DEBUG || v=%s || html_seen=%d || html_scanned=%d || attach_seen=%d || attach_scanned=%d || script_seen=%d || script_scanned=%d || decode_candidates=%d || decode_success=%d || decode_fail=%d || errors=%d",
-        VERSION, tonumber(ctx.phase.html_parts_seen) or 0, tonumber(ctx.phase.html_parts_scanned) or 0, tonumber(ctx.phase.attach_parts_seen) or 0, tonumber(ctx.phase.attach_parts_scanned) or 0, tonumber(ctx.phase.script_blocks_seen) or 0, tonumber(ctx.phase.script_blocks_scanned) or 0, tonumber(ctx.phase.decode_candidates) or 0, tonumber(ctx.phase.decode_success) or 0, tonumber(ctx.phase.decode_fail) or 0, #(ctx.errors or {})
+        "HTML_SMUGGLING_PHASE_DEBUG || v=%s || html_seen=%d || html_scanned=%d || attach_seen=%d || attach_scanned=%d || script_seen=%d || script_prescanned=%d || script_scanned=%d || decode_candidates=%d || decode_success=%d || decode_fail=%d || budget_bytes=%d || budget_decode=%d || budget_container=%d || errors=%d",
+        VERSION, tonumber(ctx.phase.html_parts_seen) or 0, tonumber(ctx.phase.html_parts_scanned) or 0, tonumber(ctx.phase.attach_parts_seen) or 0, tonumber(ctx.phase.attach_parts_scanned) or 0, tonumber(ctx.phase.script_blocks_seen) or 0, tonumber(ctx.phase.script_blocks_prescanned) or 0, tonumber(ctx.phase.script_blocks_scanned) or 0, tonumber(ctx.phase.decode_candidates) or 0, tonumber(ctx.phase.decode_success) or 0, tonumber(ctx.phase.decode_fail) or 0, tonumber(ctx.budget.bytes) or 0, tonumber(ctx.budget.decode_ops) or 0, tonumber(ctx.budget.container_ops) or 0, #(ctx.errors or {})
       ))
     end
 	if #(ctx.errors or {}) > 0 then
@@ -4023,7 +4473,8 @@ local function apply_markers(ctx)
     task:insert_result("HTML_SMUGGLING_MARKER_CSS_CODE_EXEC", 1.0)
   end
 
-  if reasons["rc4_ksa_pattern"] or reasons["rc4_prga_pattern"] or reasons["rc4_xor_loop"] then
+  if reasons["rc4_ksa_pattern"] or reasons["rc4_prga_pattern"] or reasons["rc4_xor_loop"] or
+     reasons["rc4_constant_payload"] or reasons["xor_constant_payload"] then
     task:insert_result("HTML_SMUGGLING_MARKER_RC4_DECRYPT", 1.0)
   end
 
@@ -4128,7 +4579,7 @@ local function detect_html_smuggling_payload(task)
     else
       scan_non_html_part(ctx, p)
     end
-    if has_any_critical_kind(ctx) then break end
+    if has_any_critical_kind(ctx) or ctx.budget.exhausted or not ctx:budget_time_ok() then break end
   end
   finalize_score(ctx)
   apply_markers(ctx)
@@ -4232,6 +4683,10 @@ if DEBUG then
     advanced_deobfuscate = advanced_deobfuscate,
     base64_magic_hint = base64_magic_hint,
     sniff_decoded = sniff_decoded,
+    parse_zip_entries = V46.parse_zip_entries,
+    analyze_zip_container = V46.analyze_zip_container,
+    reconstruct_constant_crypto = V46.reconstruct_constant_crypto,
+    prescan_all_script_entries = V46.prescan_all_script_entries,
     calculate_entropy = calculate_entropy,
     finalize_score = finalize_score,
     MODULES = MODULES,
