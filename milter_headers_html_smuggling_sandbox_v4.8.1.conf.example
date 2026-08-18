@@ -1,0 +1,25 @@
+# Example snippet for /etc/rspamd/local.d/milter_headers.conf
+#
+# IMPORTANT:
+# Merge this routine into your existing milter_headers.conf if "use" or "custom"
+# already exists. Do not blindly replace an existing use-list.
+#
+# Purpose:
+# HTML_SMUGGLING_SANDBOX_CANDIDATE -> X-HEC-Sandbox-Queue: 1
+
+use = ["html_smuggling_sandbox"];
+
+custom {
+  html_smuggling_sandbox = <<EOD
+return function(task, common_meta)
+  if task:has_symbol('HTML_SMUGGLING_SANDBOX_CANDIDATE') then
+    return nil,
+      {['X-HEC-Sandbox-Queue'] = '1'},
+      {['X-HEC-Sandbox-Queue'] = 0},
+      {}
+  end
+
+  return nil, {}, {}, {}
+end
+EOD;
+}

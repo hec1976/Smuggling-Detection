@@ -1,0 +1,6 @@
+# v4.8.1 default profile
+sandbox_escalation {
+  enabled = true;
+  log = true;
+  # reasons nicht gesetzt -> eingebaute konservative Defaults
+}

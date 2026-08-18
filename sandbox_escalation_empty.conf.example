@@ -1,0 +1,6 @@
+# Valid configuration: Handoff enabled, but no reason triggers it.
+sandbox_escalation {
+  enabled = true;
+  log = true;
+  reasons = [];
+}

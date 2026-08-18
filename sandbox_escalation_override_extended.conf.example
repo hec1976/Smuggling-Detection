@@ -1,0 +1,24 @@
+# Example: defaults plus selected additional static/staging reasons.
+# Because reasons is an exact override, all desired defaults are repeated.
+sandbox_escalation {
+  enabled = true;
+  log = true;
+  reasons = [
+    "wasm_staged_payload",
+    "wasm_worker_stage",
+    "worker_blob_stage",
+    "worker_inline_script",
+    "serviceworker_broad_scope",
+    "websocket_portscan",
+    "sharedarraybuffer_timing",
+    "dynamic_import_data",
+    "dynamic_import_blob",
+    "antisandbox_webdriver",
+    "hardware_check_evasion",
+    "human_interaction_required",
+    "wasm_inline_stage",
+    "blockchain_staged_payload",
+    "xor_constant_payload",
+    "rc4_constant_payload"
+  ];
+}

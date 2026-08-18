@@ -1,0 +1,9 @@
+# v4.8.1 exact override profile used for tests 71/72
+sandbox_escalation {
+  enabled = true;
+  log = true;
+  reasons = [
+    "xor_constant_payload",
+    "rc4_constant_payload"
+  ];
+}
