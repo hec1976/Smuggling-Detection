@@ -1,4 +1,4 @@
-# HTML Smuggling Detection v4.7.0
+# HTML Smuggling Detection v4.7.1
 
 ![Version](https://img.shields.io/badge/Version-4.7.0-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
@@ -9,6 +9,18 @@ Rspamd-Lua-Modul zur Erkennung von **HTML Smuggling**, verschleierten JavaScript
 Version **4.7.0** baut auf v4.6.0 auf und erweitert den Scanner gezielt bei **DOM-Sinks, Dynamic Imports, Worker-/ServiceWorker-Staging, moderner Evasion und begrenzter ZIP-Tiefenanalyse**. Die v4.6-Pfade für globale Budgets, Script-Prescan, strukturiertes ZIP-Parsing sowie XOR-/RC4-Rekonstruktion bleiben erhalten.
 
 ---
+
+## v4.7.1 Bugfix – rekursiver JavaScript-Deep-Scan
+
+v4.7.1 korrigiert die Scope-Bindung von `scan_v47_script_risk_module`.
+Die Funktion wird vor `scan_decoded_script_blob()` als Local vorab deklariert und später per
+`scan_v47_script_risk_module = function(...)` befüllt. Dadurch funktioniert der rekursive Pfad
+für dekodiertes JavaScript wieder zuverlässig.
+
+Der Regressionstest `test69_v471_recursive_decoded_js_scope_regression.html` prüft gezielt,
+dass ein Base64-dekodierter JavaScript-Payload den v4.7-Risk-Scanner erreicht und
+`dynamic_import_data` erzeugt.
+
 
 ## Zweck
 
@@ -34,9 +46,9 @@ Das Ziel ist **keine vollständige forensische Dateianalyse**, sondern eine robu
 
 ---
 
-## Was ist neu in v4.7.0?
+## Was ist neu in v4.7.1?
 
-Die v4.7.0-Erweiterungen konzentrieren sich auf reale Lücken mit gutem Nutzen-/FP-Verhältnis:
+Die v4.7.1-Erweiterungen konzentrieren sich auf reale Lücken mit gutem Nutzen-/FP-Verhältnis:
 
 - **DOM Dynamic Sinks** im Payload-Kontext:
   - `.innerHTML =`
@@ -124,7 +136,7 @@ Die wichtigsten Erweiterungen gegenüber v4.5.0:
   - `rc4_constant_payload`
 - neue Info-Reasons für Ressourcenlimits und unvollständige ZIP-Auswertung
 
-Die v4.6- und v4.5-Erweiterungen bleiben vollständig Bestandteil von v4.7.0, insbesondere:
+Die v4.6- und v4.5-Erweiterungen bleiben vollständig Bestandteil von v4.7.1, insbesondere:
 
 - Base64 Magic-Prefix Fast-Path
 - priorisierte Base64-Kandidaten
@@ -973,7 +985,7 @@ Dadurch bleibt der Scanner auch bei grossen oder absichtlich problematischen Nac
 
 ### Budget- und Parser-Info-Reasons
 
-Wenn ein Schutzlimit erreicht wird oder eine ZIP-Metadaten-Heuristik greift, kann v4.7.0 unter anderem folgende Info-Reasons setzen:
+Wenn ein Schutzlimit erreicht wird oder eine ZIP-Metadaten-Heuristik greift, kann v4.7.1 unter anderem folgende Info-Reasons setzen:
 
 ```text
 global_runtime_budget
@@ -1032,12 +1044,12 @@ Nicht oder nur eingeschränkt umgesetzt sind:
 
 ---
 
-## Test-Suite v4.7.0-r1
+## Test-Suite v4.7.1-r1
 
-Zur v4.7.0-Linie gehört eine vollständige HTML-/Script-Regressionssuite mit **68 Testfällen**.
+Zur v4.7.1-Linie gehört eine vollständige HTML-/Script-Regressionssuite mit **68 Testfällen**.
 
 ```text
-HTML_Smuggling_v4.7.0_Tests_01-68.zip
+HTML_Smuggling_v4.7.1_Tests_01-68.zip
 ```
 
 Tests **01–56** decken den bisherigen v4.6.0-Stand ab. Neu hinzugekommen sind:
@@ -1080,7 +1092,7 @@ Besonders riskante Dateitypen wie CHM, HTA, LNK, OneNote und Script-Dateien soll
 
 ## Kurzfazit
 
-**v4.7.0** erweitert v4.6.0 gezielt dort, wo moderne Browser- und Containertechnik neue Ausweichpfade eröffnet:
+**v4.7.1** erweitert v4.6.0 gezielt dort, wo moderne Browser- und Containertechnik neue Ausweichpfade eröffnet:
 
 - DOM-Sinks und Dynamic Imports werden kontextabhängig erfasst
 - Worker- und ServiceWorker-Staging werden tiefer bewertet
@@ -1092,4 +1104,4 @@ Besonders riskante Dateitypen wie CHM, HTA, LNK, OneNote und Script-Dateien soll
 
 Die v4.6-Stärken bleiben erhalten: Magic-Prefix-Priorisierung, rekursives Base64-Decoding, `Uint8Array`-Rekonstruktion, strukturiertes ZIP-Parsing, Attachment-Magic-Prüfung, Image-Tail-Carving sowie XOR-/RC4-Rekonstruktion.
 
-Damit ist v4.7.0 ein stärkerer **produktionsnaher Rspamd-Mail-Gateway-Stand**, ohne den Scanner in Richtung unbeschränkter Sandbox- oder Vollforensik zu verschieben.
+Damit ist v4.7.1 ein stärkerer **produktionsnaher Rspamd-Mail-Gateway-Stand**, ohne den Scanner in Richtung unbeschränkter Sandbox- oder Vollforensik zu verschieben.
