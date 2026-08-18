@@ -1,141 +1,68 @@
-# HTML Smuggling Detection v4.6.0 – Detaillierte Test-Suite 01–56
+# HTML Smuggling Detection v4.7.0 – Detaillierte Test-Suite 01–68
 
 ## Überblick
 
-Dieses Dokument beschreibt die komplette HTML-/Script-Regression-Test-Suite für
-`html_smuggling.lua` **v4.6.0**.
+Dieses Dokument beschreibt die vollständige HTML-/Script-Regressionssuite für `html_smuggling.lua` **v4.7.0**.
 
-Die Suite enthält **56 einzelne HTML-Testdateien** und deckt die wesentlichen
-Erkennungspfade der aktuellen Implementierung ab:
+Die Suite enthält **68 einzelne HTML-Testdateien**. Tests 01–56 bilden den v4.6.0-Stand ab; Tests 57–68 prüfen die neuen v4.7.0-Pfade.
 
-- HTML Smuggling und Base64-Decoding
-- Blob / `URL.createObjectURL()` / Fetch
-- Split Payloads und Array-Join-Rekonstruktion
-- JavaScript-Obfuskation
-- `Uint8Array` in dezimaler und hexadezimaler Form
-- rekursive Base64-Decodierung
-- WASM- und AppInstaller-Staging
-- PDF- und SVG-Active-Content
-- CHM / HTA / Script-Payloads
-- Zertifikats- und PKCS-Smuggling-Indikatoren
-- CSS Exfiltration und CSS Code Execution
-- Geo-Targeting und Anti-Sandbox/Evasion
-- Local-/SessionStorage-Persistenz
-- Domain Rotation und berechnete Redirects
-- ClickFix / Fake CAPTCHA / Clipboard-Lures
-- Push Abuse und Blockchain-Staging
-- Script-Prescan und globale Ressourcenbudgets
-- strukturierte ZIP-Analyse
-- konstante XOR- und RC4-Payload-Rekonstruktion
-
-## Dateien
-
-Die vollständige Suite besteht aus:
-
-- `test01_...html` bis `test56_...html`
-- `test_manifest_01-56.csv`
-- `test_manifest_01-56.json`
-- `README.md`
-- diesem detaillierten README
-
-## Wichtiger Hinweis
-
-Die eingebetteten PE-, WASM-, ZIP-, GZIP-, PDF-, CHM-, LNK- und Crypto-Payloads
-sind **synthetische Testdaten**. Sie dienen ausschliesslich dazu, Magic-Header,
-Rekonstruktions- und Klassifikationspfade der Erkennung zu prüfen.
-
-Die HTML-Suite ersetzt **keine vollständige MIME-/EML-Test-Suite**. Funktionen,
-die echte Mail-Part-Metadaten, Attachment-Dateinamen, Header oder Rspamd-Maps
-benötigen, müssen separat mit EML-Dateien geprüft werden.
-
-## Erwartungswerte
-
-Jeder Test besitzt folgende Felder:
-
-- **ExpectedDetection** – ob der Test grundsätzlich erkannt werden soll
-- **ExpectedScore** – grober erwarteter Score-Bereich
-- **ExpectedCoreReasons** – zentrale Reasons, die erwartet werden
-- **ExpectedInfoReasons** – optionale reine Info-/Budget-Reasons
-
-Die Score-Werte sind bewusst als Bereiche angegeben. Für Regression-Tests sind
-die **Reasons und Marker wichtiger als ein exakt identischer numerischer Score**.
-
-Typische Bereiche:
-
-| Bereich | Bedeutung |
-|---|---|
-| `0-1` / `0-2` | Negativtest bzw. praktisch kein verdächtiges Signal |
-| `0-3` | Info-/Soft-Signal |
-| `2-6` | schwache bis mittlere Heuristik |
-| `4-8` | deutlicher positiver Pfad |
-| `6-10` / `6-12` | starker Container-/Staging-Pfad |
-| `8-10 group capped` | starker Pfad mit externer Gruppenbegrenzung |
-| `8-15 capped` | starker Script-/Container-Pfad |
-| `10-15 capped` | kritischer Pfad oder mehrere starke Klassen |
-| `10-15 internal capped` | kombinierter Test bis zum internen Maximum |
-
-Der Lua-Code verwendet standardmässig `max_final_score = 15.0`. Eine zusätzliche
-Rspamd-Gruppenbegrenzung kann den sichtbaren Endscore weiter begrenzen.
+Die eingebetteten Binärdaten sind synthetische Testdaten. Echte MIME-/Attachment-Metadaten werden weiterhin in einer separaten EML-Suite benötigt.
 
 ## Testgruppen
 
-### Tests 01–05 – Grundlegendes HTML Smuggling und WASM
+### Tests 01–10
+
+Basis-Smuggling, Obfuskation, WASM, Uint8Array, Delay, Worker, Fetch, AppInstaller
 
 - `test01_basic_pe_smuggling.html` – Basis: atob plus Blob plus createObjectURL plus PE
 - `test02_split_payload_pe_fixed.html` – Korrigierter Split Payload mit mindestens sechs Fragmenten
 - `test03_array_join_pe.html` – Array.join Konstruktion mit PE Payload
 - `test04_obfuscated_pe.html` – Obfuskierter Zugriff ueber Array Indizes und Konstruktoren
 - `test05_wasm_smuggling.html` – WASM Modul ueber fetch und WebAssembly.instantiate
-
-### Tests 06–10 – Uint8Array, Delayed Execution, Worker, Fetch und AppInstaller
-
 - `test06_uint8array_pe_large.html` – Korrigierter Uint8Array Test mit mehr als 1024 Bytewerten
 - `test07_delayed_execution_pe.html` – Verzoegertes Smuggling ueber setTimeout
 - `test08_webworker_pe.html` – Web Worker verarbeitet den Base64 Payload
 - `test09_fetch_api_pe.html` – Fetch API plus Data URI Transport
 - `test10_appinstaller_schema.html` – AppInstaller Schema und XML Kontext
 
-### Tests 11–15 – PDF, SVG, CHM und HTA
+### Tests 11–20
+
+PDF, SVG, CHM, HTA, Zertifikat und CSS Code Execution
 
 - `test11_pdf_javascript_payload.html` – PDF mit JavaScript Action im Decode Pfad
 - `test12_pdf_launch_payload.html` – PDF mit Launch und EmbeddedFile im Decode Pfad
 - `test13_svg_active_content.html` – Aktives SVG in eingebetteter object data URI Form
 - `test14_chm_payload.html` – CHM Payload ueber Base64 und Blob
 - `test15_hta_payload.html` – HTA Payload ueber Base64 und Blob
-
-### Tests 16–20 – Zertifikate und CSS Code Execution
-
 - `test16_certificate_inline_pem.html` – Inline PEM Zertifikat ohne starken Smuggling Kontext
 - `test17_certificate_pkcs7_inline.html` – Inline PKCS7 Block ohne starken Smuggling Kontext
 - `test18_certificate_smuggling_context.html` – Zertifikatsblock zusammen mit Smuggling Kontext
 - `test19_css_code_execution.html` – CSS Inhalte werden spaeter als Code missbraucht
 - `test20_css_computedstyle_exec.html` – getComputedStyle liest versteckten Inhalt aus
 
-### Tests 21–25 – External Scripts, CSS Exfiltration und Geo Targeting
+### Tests 21–35
+
+External Scripts, CSS Exfil, Geo, Evasion, Persistence, Rotation, ClickFix, Push, Blockchain
 
 - `test21_external_scripts_positive.html` – Externes Script im vorhandenen Smuggling Kontext
 - `test22_css_exfil_attr.html` – CSS attr Exfiltration ueber background url
 - `test23_css_import_external.html` – Externer CSS Import
 - `test24_geo_targeting_api.html` – Geo API und Geolocation in einem Script
 - `test25_timezone_targeting.html` – Timezone basierte Selektionslogik
-
-### Tests 26–30 – Evasion, Persistence und Domain Rotation
-
 - `test26_evasion_webdriver.html` – Antisandbox ueber navigator.webdriver
 - `test27_evasion_hardware_check.html` – Hardware Checks fuer kleine oder virtuelle Systeme
 - `test28_persistence_localstorage.html` – LocalStorage Speicherung und Wiederverwendung
 - `test29_persistence_sessionstorage.html` – SessionStorage Persistenz
 - `test30_domain_rotation.html` – Drei Domains und Redirect Logik
-
-### Tests 31–35 – Redirect, ClickFix, Push Abuse und Blockchain Staging
-
 - `test31_computed_redirect.html` – Redirect Ziel wird dynamisch zusammengesetzt
 - `test32_clickfix_run_dialog.html` – Run Dialog und PowerShell Lure
 - `test33_fake_captcha_clipboard.html` – Fake CAPTCHA mit Clipboard und Exec Kontext
 - `test34_push_abuse.html` – Notification Permission plus Service Worker und PushManager
 - `test35_blockchain_staging.html` – Web3 oder Ethers basierte Staging Logik
 
-### Tests 36–40 – Negative Tests, Newsletter, All-in-One und SVG Data URI
+### Tests 36–40
+
+Negative Tests, Newsletter-HTML, All-in-One, SVG Data URI
 
 - `test36_legitimate_negative.html` – Legitime einfache Seite ohne verdaechtige APIs
 - `test37_safe_external_negative.html` – Externe Scripts ohne Smuggling Kontext
@@ -143,16 +70,15 @@ Rspamd-Gruppenbegrenzung kann den sichtbaren Endscore weiter begrenzen.
 - `test39_all_in_one_capped.html` – Kombinierter Test fuer mehrere Module mit realistischer Cap Erwartung
 - `test40_svg_data_uri_pe_direct.html` – Direkter SVG Data URI Test fuer den eingebetteten SVG Extraktionspfad
 
-### Tests 41–45 – Neue v4.6.0 Prescan-, Decode- und Content-Pfade
+### Tests 41–56
+
+v4.6 Prescan, Nested Decode, ZIP-Parser, XOR und RC4
 
 - `test41_v46_script_prescan_magic_late.html` – v4.6: billiger Vorscan erkennt Magic-Prefix in spaetem Script
 - `test42_v46_script_prescan_budget.html` – v4.6: kontrolliertes Prescan-Budget bei >64 Scripts
 - `test43_v46_uint8array_hex_pe.html` – Hexadezimale Uint8Array Bytefolge mit PE Magic
 - `test44_v46_nested_base64_pe.html` – Rekursiver Base64 Decode mit PE in zweiter Stufe
 - `test45_v46_gzip_magic_payload.html` – GZIP Magic Header fuer erweiterte Content Klassifikation
-
-### Tests 46–54 – Neuer v4.6.0 ZIP-Parser
-
 - `test46_v46_zip_executable_member.html` – ZIP mit payload.exe
 - `test47_v46_zip_script_member.html` – ZIP mit stage.ps1
 - `test48_v46_zip_double_extension.html` – ZIP mit invoice.pdf.exe
@@ -162,15 +88,29 @@ Rspamd-Gruppenbegrenzung kann den sichtbaren Endscore weiter begrenzen.
 - `test52_v46_zip_stored_pe.html` – Stored ZIP Mitglied enthaelt PE Payload
 - `test53_v46_zip_encrypted_flag.html` – ZIP mit Encryption Flag
 - `test54_v46_zip_many_entries.html` – ZIP mit 257 Eintraegen
-
-### Tests 55–56 – Konstante XOR-/RC4-Rekonstruktion
-
 - `test55_v46_xor_constant_pe.html` – Konstantes XOR Bytearray wird als PE rekonstruiert
 - `test56_v46_rc4_constant_pe.html` – Konstantes RC4 Bytearray wird als PE rekonstruiert
 
+### Tests 57–68
+
+v4.7 DOM, Imports, Worker/ServiceWorker, Evasion, Obfuskation und ZIP-Tiefenanalyse
+
+- `test57_v47_dom_dynamic_sink.html` – DOM Sink innerHTML zusammen mit Base64/Payload-Kontext
+- `test58_v47_dynamic_import_data.html` – Dynamischer import() direkt aus einer data: JavaScript URL
+- `test59_v47_worker_blob_reconstruction.html` – Worker wird aus statischem Blob-Script erzeugt; Worker-Code ist begrenzt rekonstruierbar
+- `test60_v47_serviceworker_broad_scope.html` – ServiceWorker Registrierung mit Root-Scope
+- `test61_v47_websocket_portscan.html` – Mehrere WebSocket-Verbindungen auf verschiedene lokale Ports als Portscan-Heuristik
+- `test62_v47_jsfuck_obfuscation.html` – JSFuck-typische Tokenkombinationen werden als Obfuskation erkannt
+- `test63_v47_unicode_escape_payload.html` – Unicode-Escapes rekonstruieren einen verschleierten API-Namen
+- `test64_v47_template_literal_obfuscation.html` – Template Literal mit ${...}-Konstruktion und Exec-Kontext
+- `test65_v47_zip_comment_payload.html` – ZIP Central-Directory-Kommentar enthaelt Base64-codierte synthetische PE-Payload
+- `test66_v47_zip_high_entropy_stored.html` – Stored ZIP-Mitglied mit hoher Entropie setzt einen Info-Reason
+- `test67_v47_nested_stored_zip_pe.html` – Stored ZIP-in-ZIP wird unter Decode-/Container-Budget rekursiv bis zur PE-Payload analysiert
+- `test68_v47_sharedarraybuffer_timing.html` – SharedArrayBuffer + Atomics + performance.now als Sidechannel/Evasion-Indikator
+
 ---
 
-# Detaillierte Beschreibung aller Tests
+# Detaillierte Testfälle
 
 ## Test 01 – `test01_basic_pe_smuggling.html`
 
@@ -180,7 +120,7 @@ Rspamd-Gruppenbegrenzung kann den sichtbaren Endscore weiter begrenzen.
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `atob,blob,createObjectURL,dec_pe`  
 
-Prüft den klassischen HTML-Smuggling-Pfad aus Base64 → `atob()` → Blob → `createObjectURL()` und anschliessender PE-Klassifikation.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 02 – `test02_split_payload_pe_fixed.html`
 
@@ -190,7 +130,7 @@ Prüft den klassischen HTML-Smuggling-Pfad aus Base64 → `atob()` → Blob → 
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `split_payload,atob,blob,createObjectURL,dec_pe`  
 
-Prüft die Rekonstruktion einer in mindestens sechs Fragmente zerlegten Base64-Payload und den `split_payload`-Pfad.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 03 – `test03_array_join_pe.html`
 
@@ -200,7 +140,7 @@ Prüft die Rekonstruktion einer in mindestens sechs Fragmente zerlegten Base64-P
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `atob,blob,createObjectURL,b64_joined_parts,dec_pe`  
 
-Prüft Base64-Fragmente, die über ein Array und `.join('')` wieder zusammengesetzt werden.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 04 – `test04_obfuscated_pe.html`
 
@@ -210,7 +150,7 @@ Prüft Base64-Fragmente, die über ein Array und `.join('')` wieder zusammengese
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `atob_obfuscated or obfus_api,blob,createObjectURL,dec_pe`  
 
-Prüft verschleierte API-Namen und indirekte Zugriffe auf `atob`, `Blob` und `createObjectURL`.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 05 – `test05_wasm_smuggling.html`
 
@@ -220,7 +160,7 @@ Prüft verschleierte API-Namen und indirekte Zugriffe auf `atob`, `Blob` und `cr
 **ExpectedScore:** `6-10`  
 **ExpectedCoreReasons:** `fetch,webassembly or wasm_fetch_stage`  
 
-Prüft WASM-Staging über Base64, Blob, Fetch und `WebAssembly.instantiate()`.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 06 – `test06_uint8array_pe_large.html`
 
@@ -230,7 +170,7 @@ Prüft WASM-Staging über Base64, Blob, Fetch und `WebAssembly.instantiate()`.
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `uint8array_payload,pe_uint8array`  
 
-Prüft ein grosses dezimales `Uint8Array` mit PE-Magic und mehr als 1024 Bytewerten.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 07 – `test07_delayed_execution_pe.html`
 
@@ -240,7 +180,7 @@ Prüft ein grosses dezimales `Uint8Array` mit PE-Magic und mehr als 1024 Bytewer
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `delayed_execution,timeout_b64_smuggling or timeout_b64_decode,dec_pe`  
 
-Prüft verzögerte Ausführung über `setTimeout()` zusammen mit einem Base64-PE-Payload.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 08 – `test08_webworker_pe.html`
 
@@ -250,7 +190,7 @@ Prüft verzögerte Ausführung über `setTimeout()` zusammen mit einem Base64-PE
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `webworker,atob,blob,createObjectURL,dec_pe`  
 
-Prüft Payload-Verarbeitung innerhalb eines Web Workers und anschliessende Blob-Erzeugung.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 09 – `test09_fetch_api_pe.html`
 
@@ -260,7 +200,7 @@ Prüft Payload-Verarbeitung innerhalb eines Web Workers und anschliessende Blob-
 **ExpectedScore:** `6-10`  
 **ExpectedCoreReasons:** `fetch,data_uri or blob,createObjectURL or dec_pe`  
 
-Prüft `fetch()` auf einer Data-URI sowie den anschliessenden Blob-/ObjectURL-Pfad.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 10 – `test10_appinstaller_schema.html`
 
@@ -270,7 +210,7 @@ Prüft `fetch()` auf einer Data-URI sowie den anschliessenden Blob-/ObjectURL-Pf
 **ExpectedScore:** `4-8`  
 **ExpectedCoreReasons:** `ms_appinstaller_uri or ms_appinstaller_word`  
 
-Prüft `ms-appinstaller:` und XML-AppInstaller-Kontext.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 11 – `test11_pdf_javascript_payload.html`
 
@@ -280,7 +220,7 @@ Prüft `ms-appinstaller:` und XML-AppInstaller-Kontext.
 **ExpectedScore:** `4-8`  
 **ExpectedCoreReasons:** `dec_pdf,att_pdf_javascript`  
 
-Prüft eine Base64-dekodierte PDF-Datei mit eingebettetem JavaScript bzw. `/OpenAction`.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 12 – `test12_pdf_launch_payload.html`
 
@@ -290,7 +230,7 @@ Prüft eine Base64-dekodierte PDF-Datei mit eingebettetem JavaScript bzw. `/Open
 **ExpectedScore:** `6-10`  
 **ExpectedCoreReasons:** `dec_pdf,att_pdf_launch,att_pdf_embeddedfile`  
 
-Prüft PDF-Active-Content mit `/Launch` und `/EmbeddedFile`.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 13 – `test13_svg_active_content.html`
 
@@ -300,7 +240,7 @@ Prüft PDF-Active-Content mit `/Launch` und `/EmbeddedFile`.
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `att_svg_script,att_svg_event_handler,att_svg_foreignobject,att_svg_data_uri,att_svg_smuggling_context`  
 
-Prüft aktives SVG mit Script, Event Handler, `foreignObject` und Data-URI-Smuggling.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 14 – `test14_chm_payload.html`
 
@@ -310,7 +250,7 @@ Prüft aktives SVG mit Script, Event Handler, `foreignObject` und Data-URI-Smugg
 **ExpectedScore:** `6-10`  
 **ExpectedCoreReasons:** `att_chm_attachment or CHM decode indicator`  
 
-Prüft einen CHM-Magic-Header innerhalb des HTML-Decode-Pfads.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 15 – `test15_hta_payload.html`
 
@@ -320,7 +260,7 @@ Prüft einen CHM-Magic-Header innerhalb des HTML-Decode-Pfads.
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `att_hta_attachment or dec_script`  
 
-Prüft HTA-/Script-Inhalt innerhalb einer Base64-dekodierten Blob-Payload.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 16 – `test16_certificate_inline_pem.html`
 
@@ -330,7 +270,7 @@ Prüft HTA-/Script-Inhalt innerhalb einer Base64-dekodierten Blob-Payload.
 **ExpectedScore:** `2-5`  
 **ExpectedCoreReasons:** `cert_inline_pem or cert_base64_block`  
 
-Prüft Zertifikats-/PKCS-Indikatoren; Test 18 kombiniert diese zusätzlich mit starkem Smuggling-Kontext.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 17 – `test17_certificate_pkcs7_inline.html`
 
@@ -340,7 +280,7 @@ Prüft Zertifikats-/PKCS-Indikatoren; Test 18 kombiniert diese zusätzlich mit s
 **ExpectedScore:** `2-5`  
 **ExpectedCoreReasons:** `cert_inline_pkcs or cert_base64_block`  
 
-Prüft Zertifikats-/PKCS-Indikatoren; Test 18 kombiniert diese zusätzlich mit starkem Smuggling-Kontext.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 18 – `test18_certificate_smuggling_context.html`
 
@@ -350,7 +290,7 @@ Prüft Zertifikats-/PKCS-Indikatoren; Test 18 kombiniert diese zusätzlich mit s
 **ExpectedScore:** `4-8`  
 **ExpectedCoreReasons:** `cert_inline_pem or cert_base64_block plus Smuggling Kontext`  
 
-Prüft Zertifikats-/PKCS-Indikatoren; Test 18 kombiniert diese zusätzlich mit starkem Smuggling-Kontext.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 19 – `test19_css_code_execution.html`
 
@@ -360,7 +300,7 @@ Prüft Zertifikats-/PKCS-Indikatoren; Test 18 kombiniert diese zusätzlich mit s
 **ExpectedScore:** `4-8`  
 **ExpectedCoreReasons:** `css_before_after_content,css_hidden_code_string,css_function_bridge,css_code_execution`  
 
-Prüft CSS als versteckten Code-Speicher und die spätere Ausführung über JavaScript-/ComputedStyle-Brücken.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 20 – `test20_css_computedstyle_exec.html`
 
@@ -370,7 +310,7 @@ Prüft CSS als versteckten Code-Speicher und die spätere Ausführung über Java
 **ExpectedScore:** `4-8`  
 **ExpectedCoreReasons:** `css_computedstyle_exec,css_function_bridge`  
 
-Prüft CSS als versteckten Code-Speicher und die spätere Ausführung über JavaScript-/ComputedStyle-Brücken.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 21 – `test21_external_scripts_positive.html`
 
@@ -380,7 +320,7 @@ Prüft CSS als versteckten Code-Speicher und die spätere Ausführung über Java
 **ExpectedScore:** `4-8`  
 **ExpectedCoreReasons:** `atob,external_scripts`  
 
-Prüft, dass externe Scripts nur zusammen mit vorhandenem Smuggling-Kontext positiv gewertet werden.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 22 – `test22_css_exfil_attr.html`
 
@@ -390,7 +330,7 @@ Prüft, dass externe Scripts nur zusammen mit vorhandenem Smuggling-Kontext posi
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `css_attr_exfil,css_exfiltration`  
 
-Prüft CSS-Exfiltrationsmuster bzw. externe CSS-Imports.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 23 – `test23_css_import_external.html`
 
@@ -400,7 +340,7 @@ Prüft CSS-Exfiltrationsmuster bzw. externe CSS-Imports.
 **ExpectedScore:** `0-3`  
 **ExpectedCoreReasons:** `css_import_external`  
 
-Prüft CSS-Exfiltrationsmuster bzw. externe CSS-Imports.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 24 – `test24_geo_targeting_api.html`
 
@@ -410,7 +350,7 @@ Prüft CSS-Exfiltrationsmuster bzw. externe CSS-Imports.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `geo_targeting_api,geo_location_api`  
 
-Prüft Geo-/Timezone-basierte Zielauswahl.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 25 – `test25_timezone_targeting.html`
 
@@ -420,7 +360,7 @@ Prüft Geo-/Timezone-basierte Zielauswahl.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `timezone_targeting`  
 
-Prüft Geo-/Timezone-basierte Zielauswahl.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 26 – `test26_evasion_webdriver.html`
 
@@ -430,7 +370,7 @@ Prüft Geo-/Timezone-basierte Zielauswahl.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `antisandbox_webdriver`  
 
-Prüft typische Anti-Sandbox-/Evasion-Signale wie `navigator.webdriver`, CPU-/Memory- und Screen-Checks.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 27 – `test27_evasion_hardware_check.html`
 
@@ -440,7 +380,7 @@ Prüft typische Anti-Sandbox-/Evasion-Signale wie `navigator.webdriver`, CPU-/Me
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `hardware_check_evasion`  
 
-Prüft typische Anti-Sandbox-/Evasion-Signale wie `navigator.webdriver`, CPU-/Memory- und Screen-Checks.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 28 – `test28_persistence_localstorage.html`
 
@@ -450,7 +390,7 @@ Prüft typische Anti-Sandbox-/Evasion-Signale wie `navigator.webdriver`, CPU-/Me
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `localstorage_persistence`  
 
-Prüft Persistenzindikatoren über LocalStorage bzw. SessionStorage.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 29 – `test29_persistence_sessionstorage.html`
 
@@ -460,7 +400,7 @@ Prüft Persistenzindikatoren über LocalStorage bzw. SessionStorage.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `sessionstorage_persistence`  
 
-Prüft Persistenzindikatoren über LocalStorage bzw. SessionStorage.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 30 – `test30_domain_rotation.html`
 
@@ -470,7 +410,7 @@ Prüft Persistenzindikatoren über LocalStorage bzw. SessionStorage.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `domain_rotation`  
 
-Prüft Domain-Rotation bzw. dynamisch zusammengesetzte Redirect-Ziele.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 31 – `test31_computed_redirect.html`
 
@@ -480,7 +420,7 @@ Prüft Domain-Rotation bzw. dynamisch zusammengesetzte Redirect-Ziele.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `computed_redirect`  
 
-Prüft Domain-Rotation bzw. dynamisch zusammengesetzte Redirect-Ziele.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 32 – `test32_clickfix_run_dialog.html`
 
@@ -490,7 +430,7 @@ Prüft Domain-Rotation bzw. dynamisch zusammengesetzte Redirect-Ziele.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `run_dialog_lure,powershell_lure or clickfix_lure`  
 
-Prüft ClickFix-/Fake-CAPTCHA-Lures sowie PowerShell-/Clipboard-Kontext.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 33 – `test33_fake_captcha_clipboard.html`
 
@@ -500,7 +440,7 @@ Prüft ClickFix-/Fake-CAPTCHA-Lures sowie PowerShell-/Clipboard-Kontext.
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `fake_captcha_lure,clipboard_exec_lure,clickfix_lure`  
 
-Prüft ClickFix-/Fake-CAPTCHA-Lures sowie PowerShell-/Clipboard-Kontext.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 34 – `test34_push_abuse.html`
 
@@ -510,7 +450,7 @@ Prüft ClickFix-/Fake-CAPTCHA-Lures sowie PowerShell-/Clipboard-Kontext.
 **ExpectedScore:** `0-3`  
 **ExpectedCoreReasons:** `push_permission_request,push_serviceworker_combo,push_notification_flow`  
 
-Prüft Notification Permission, Service Worker und PushManager als Push-Abuse-Kombination.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 35 – `test35_blockchain_staging.html`
 
@@ -520,7 +460,7 @@ Prüft Notification Permission, Service Worker und PushManager als Push-Abuse-Ko
 **ExpectedScore:** `2-6`  
 **ExpectedCoreReasons:** `web3_api_usage,ethers_contract_payload,blockchain_remote_stage or blockchain_staged_payload`  
 
-Prüft Web3-/Ethers-basierte Remote-Staging-Logik.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 36 – `test36_legitimate_negative.html`
 
@@ -530,7 +470,7 @@ Prüft Web3-/Ethers-basierte Remote-Staging-Logik.
 **ExpectedScore:** `0-1`  
 **ExpectedCoreReasons:** `none`  
 
-Negativtest ohne verdächtige APIs oder Payload-Muster.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 37 – `test37_safe_external_negative.html`
 
@@ -540,7 +480,7 @@ Negativtest ohne verdächtige APIs oder Payload-Muster.
 **ExpectedScore:** `0-2`  
 **ExpectedCoreReasons:** `none`  
 
-Negativtest mit bekannten externen Bibliotheken, aber ohne Smuggling-Kontext.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 38 – `test38_html_keyword_newsletter_like.html`
 
@@ -550,7 +490,7 @@ Negativtest mit bekannten externen Bibliotheken, aber ohne Smuggling-Kontext.
 **ExpectedScore:** `0-2`  
 **ExpectedCoreReasons:** `html_keyword newsletter heuristic only`  
 
-Prüft Newsletter-artige HTML-Wörter ohne echte Mail-Header. Erwartet wird deshalb höchstens ein schwaches Signal.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 39 – `test39_all_in_one_capped.html`
 
@@ -560,7 +500,7 @@ Prüft Newsletter-artige HTML-Wörter ohne echte Mail-Header. Erwartet wird desh
 **ExpectedScore:** `10-15 internal capped`  
 **ExpectedCoreReasons:** `mehrere Klassen, intern gedeckelt`  
 
-Kombiniert mehrere Module und prüft insbesondere, dass der Endscore korrekt gedeckelt bleibt.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 40 – `test40_svg_data_uri_pe_direct.html`
 
@@ -570,7 +510,7 @@ Kombiniert mehrere Module und prüft insbesondere, dass der Endscore korrekt ged
 **ExpectedScore:** `8-10 group capped`  
 **ExpectedCoreReasons:** `att_svg_data_uri,att_svg_script,att_svg_event_handler,dec_pe`  
 
-Prüft den direkten eingebetteten SVG-Data-URI-Pfad inklusive enthaltener PE-Payload.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 41 – `test41_v46_script_prescan_magic_late.html`
 
@@ -580,7 +520,7 @@ Prüft den direkten eingebetteten SVG-Data-URI-Pfad inklusive enthaltener PE-Pay
 **ExpectedScore:** `10-15 capped`  
 **ExpectedCoreReasons:** `script_prescan_payload,b64_magic_prefix,dec_pe`  
 
-Prüft den neuen v4.6-Script-Prescan. Eine Magic-Prefix-Payload in einem späteren Script muss trotzdem priorisiert werden.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 42 – `test42_v46_script_prescan_budget.html`
 
@@ -591,7 +531,7 @@ Prüft den neuen v4.6-Script-Prescan. Eine Magic-Prefix-Payload in einem später
 **ExpectedCoreReasons:** `script_prescan_payload,dec_pe`  
 **ExpectedInfoReasons:** `script_prescan_budget`  
 
-Prüft die Prescan-Limits mit mehr als 64 Inline-Scripts und erwartet zusätzlich `script_prescan_budget` als Info-Reason.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 43 – `test43_v46_uint8array_hex_pe.html`
 
@@ -601,7 +541,7 @@ Prüft die Prescan-Limits mit mehr als 64 Inline-Scripts und erwartet zusätzlic
 **ExpectedScore:** `10-15 capped`  
 **ExpectedCoreReasons:** `uint8array_payload,pe_uint8array`  
 
-Prüft die v4.6-Unterstützung hexadezimaler Bytewerte in `Uint8Array`.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 44 – `test44_v46_nested_base64_pe.html`
 
@@ -611,7 +551,7 @@ Prüft die v4.6-Unterstützung hexadezimaler Bytewerte in `Uint8Array`.
 **ExpectedScore:** `10-15 capped`  
 **ExpectedCoreReasons:** `nested_base64_payload,dec_pe`  
 
-Prüft rekursive Base64-Erkennung: die erste Decode-Stufe enthält erneut eine Base64-codierte PE-Payload.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 45 – `test45_v46_gzip_magic_payload.html`
 
@@ -621,7 +561,7 @@ Prüft rekursive Base64-Erkennung: die erste Decode-Stufe enthält erneut eine B
 **ExpectedScore:** `6-10`  
 **ExpectedCoreReasons:** `dec_compressed`  
 
-Prüft die zusätzliche Magic-Erkennung für komprimierte Inhalte anhand eines GZIP-Headers.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 46 – `test46_v46_zip_executable_member.html`
 
@@ -631,7 +571,7 @@ Prüft die zusätzliche Magic-Erkennung für komprimierte Inhalte anhand eines G
 **ExpectedScore:** `8-15 capped`  
 **ExpectedCoreReasons:** `dec_zip,zip_executable_member`  
 
-Prüft das strukturierte ZIP-Parsing auf ein ausführbares Mitglied (`payload.exe`).
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 47 – `test47_v46_zip_script_member.html`
 
@@ -641,7 +581,7 @@ Prüft das strukturierte ZIP-Parsing auf ein ausführbares Mitglied (`payload.ex
 **ExpectedScore:** `8-15 capped`  
 **ExpectedCoreReasons:** `dec_zip,zip_script_member`  
 
-Prüft das strukturierte ZIP-Parsing auf ein Script-Mitglied (`stage.ps1`).
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 48 – `test48_v46_zip_double_extension.html`
 
@@ -651,7 +591,7 @@ Prüft das strukturierte ZIP-Parsing auf ein Script-Mitglied (`stage.ps1`).
 **ExpectedScore:** `8-15 capped`  
 **ExpectedCoreReasons:** `dec_zip,zip_executable_member,zip_double_extension`  
 
-Prüft Double-Extension-Erkennung wie `invoice.pdf.exe`.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 49 – `test49_v46_zip_path_traversal.html`
 
@@ -661,7 +601,7 @@ Prüft Double-Extension-Erkennung wie `invoice.pdf.exe`.
 **ExpectedScore:** `8-15 capped`  
 **ExpectedCoreReasons:** `dec_zip,zip_script_member,zip_path_traversal`  
 
-Prüft ZIP Path Traversal über einen Namen wie `../dropper.ps1`.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 50 – `test50_v46_zip_nested_archive.html`
 
@@ -671,7 +611,7 @@ Prüft ZIP Path Traversal über einen Namen wie `../dropper.ps1`.
 **ExpectedScore:** `6-12`  
 **ExpectedCoreReasons:** `dec_zip,zip_nested_archive`  
 
-Prüft ein verschachteltes Archiv (`inner.zip`) im ZIP Central Directory.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 51 – `test51_v46_zip_high_ratio.html`
 
@@ -682,7 +622,7 @@ Prüft ein verschachteltes Archiv (`inner.zip`) im ZIP Central Directory.
 **ExpectedCoreReasons:** `dec_zip`  
 **ExpectedInfoReasons:** `zip_high_compression_ratio`  
 
-Prüft auffällige ZIP-Kompressionsmetadaten und erwartet `zip_high_compression_ratio` als Info-Reason.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 52 – `test52_v46_zip_stored_pe.html`
 
@@ -692,7 +632,7 @@ Prüft auffällige ZIP-Kompressionsmetadaten und erwartet `zip_high_compression_
 **ExpectedScore:** `10-15 capped`  
 **ExpectedCoreReasons:** `dec_zip,zip_stored_payload,dec_pe`  
 
-Prüft einen unkomprimiert gespeicherten ZIP-Eintrag, dessen Inhalt direkt als PE erkannt und rekursiv analysiert wird.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 53 – `test53_v46_zip_encrypted_flag.html`
 
@@ -702,7 +642,7 @@ Prüft einen unkomprimiert gespeicherten ZIP-Eintrag, dessen Inhalt direkt als P
 **ExpectedScore:** `6-12`  
 **ExpectedCoreReasons:** `dec_zip,zip_encrypted`  
 
-Prüft das ZIP Encryption Flag und den zugehörigen Soft-Reason.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 54 – `test54_v46_zip_many_entries.html`
 
@@ -713,7 +653,7 @@ Prüft das ZIP Encryption Flag und den zugehörigen Soft-Reason.
 **ExpectedCoreReasons:** `dec_zip`  
 **ExpectedInfoReasons:** `zip_many_entries`  
 
-Prüft das ZIP-Eintragslimit mit 257 Mitgliedern und erwartet `zip_many_entries` als Info-Reason.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 55 – `test55_v46_xor_constant_pe.html`
 
@@ -723,7 +663,7 @@ Prüft das ZIP-Eintragslimit mit 257 Mitgliedern und erwartet `zip_many_entries`
 **ExpectedScore:** `10-15 capped`  
 **ExpectedCoreReasons:** `xor_constant_payload,dec_pe`  
 
-Prüft die v4.6-Rekonstruktion eines konstant XOR-codierten PE-Payloads.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
 
 ## Test 56 – `test56_v46_rc4_constant_pe.html`
 
@@ -733,54 +673,169 @@ Prüft die v4.6-Rekonstruktion eines konstant XOR-codierten PE-Payloads.
 **ExpectedScore:** `10-15 capped`  
 **ExpectedCoreReasons:** `rc4_constant_payload,dec_pe`  
 
-Prüft die v4.6-Rekonstruktion eines konstant RC4-codierten PE-Payloads.
+Dieser Test gehört zum bewährten v4.6.0-Regressionsbestand und bleibt in v4.7.0 unverändert als Rückwärtskompatibilitätsprüfung erhalten.
+
+## Test 57 – `test57_v47_dom_dynamic_sink.html`
+
+**Kategorie:** `V47_DOM`  
+**Beschreibung:** DOM Sink innerHTML zusammen mit Base64/Payload-Kontext  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `4-8`  
+**ExpectedCoreReasons:** `dom_dynamic_sink,atob`  
+
+Prüft dynamische DOM-Schreibpfade nur zusammen mit Payload-/Exec-Kontext, um normale DOM-Nutzung nicht unnötig hoch zu bewerten.
+
+## Test 58 – `test58_v47_dynamic_import_data.html`
+
+**Kategorie:** `V47_DYNAMIC_IMPORT`  
+**Beschreibung:** Dynamischer import() direkt aus einer data: JavaScript URL  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `7-15 capped`  
+**ExpectedCoreReasons:** `dynamic_import_data`  
+
+Prüft `import()` direkt aus einer `data:`-JavaScript-URL. Dieser Pfad wird als harter Script-Indikator behandelt.
+
+## Test 59 – `test59_v47_worker_blob_reconstruction.html`
+
+**Kategorie:** `V47_WORKER`  
+**Beschreibung:** Worker wird aus statischem Blob-Script erzeugt; Worker-Code ist begrenzt rekonstruierbar  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `4-10`  
+**ExpectedCoreReasons:** `worker_blob_stage,worker_inline_script,webworker`  
+
+Prüft Worker-Blob-Staging sowie die begrenzte Rekonstruktion eines statischen Worker-Scriptstrings.
+
+## Test 60 – `test60_v47_serviceworker_broad_scope.html`
+
+**Kategorie:** `V47_SERVICEWORKER`  
+**Beschreibung:** ServiceWorker Registrierung mit Root-Scope  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `3-8`  
+**ExpectedCoreReasons:** `serviceworker_register,serviceworker_broad_scope,serviceworker_api`  
+
+Prüft ServiceWorker-Registrierung und eine auffällig breite Root-Scope-Konfiguration.
+
+## Test 61 – `test61_v47_websocket_portscan.html`
+
+**Kategorie:** `V47_EVASION`  
+**Beschreibung:** Mehrere WebSocket-Verbindungen auf verschiedene lokale Ports als Portscan-Heuristik  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `3-8`  
+**ExpectedCoreReasons:** `websocket_portscan`  
+
+Prüft WebSocket-Verbindungen zu mehreren Ports bzw. Portlisten als browserseitige Portscan-Heuristik.
+
+## Test 62 – `test62_v47_jsfuck_obfuscation.html`
+
+**Kategorie:** `V47_OBFUSCATION`  
+**Beschreibung:** JSFuck-typische Tokenkombinationen werden als Obfuskation erkannt  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `2-6`  
+**ExpectedCoreReasons:** `jsfuck_obfuscation`  
+
+Prüft typische JSFuck-Tokenkombinationen und markiert sie als Obfuskation.
+
+## Test 63 – `test63_v47_unicode_escape_payload.html`
+
+**Kategorie:** `V47_OBFUSCATION`  
+**Beschreibung:** Unicode-Escapes rekonstruieren einen verschleierten API-Namen  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `3-8`  
+**ExpectedCoreReasons:** `unicode_escape_payload,obfus_api`  
+
+Prüft die erweiterte `\uXXXX`-/`\u{...}`-Dekodierung und die Rekonstruktion verschleierter API-Namen.
+
+## Test 64 – `test64_v47_template_literal_obfuscation.html`
+
+**Kategorie:** `V47_OBFUSCATION`  
+**Beschreibung:** Template Literal mit ${...}-Konstruktion und Exec-Kontext  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `2-6`  
+**ExpectedCoreReasons:** `template_literal_obfuscation,eval_call`  
+
+Prüft Template-Literal-Konstruktionen mit `${...}` in Kombination mit Exec-/Payload-Kontext.
+
+## Test 65 – `test65_v47_zip_comment_payload.html`
+
+**Kategorie:** `V47_ZIP`  
+**Beschreibung:** ZIP Central-Directory-Kommentar enthaelt Base64-codierte synthetische PE-Payload  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `8-15 capped`  
+**ExpectedCoreReasons:** `dec_zip,zip_comment_payload,dec_pe`  
+
+Prüft Base64-/Script-Payloads innerhalb von ZIP-Central-Directory-Kommentaren.
+
+## Test 66 – `test66_v47_zip_high_entropy_stored.html`
+
+**Kategorie:** `V47_ZIP_INFO`  
+**Beschreibung:** Stored ZIP-Mitglied mit hoher Entropie setzt einen Info-Reason  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `4-10`  
+**ExpectedCoreReasons:** `dec_zip`  
+**ExpectedInfoReasons:** `zip_high_entropy_member`  
+
+Prüft hohe Entropie in unkomprimiert gespeicherten ZIP-Mitgliedern als Info-Reason.
+
+## Test 67 – `test67_v47_nested_stored_zip_pe.html`
+
+**Kategorie:** `V47_ZIP_RECURSION`  
+**Beschreibung:** Stored ZIP-in-ZIP wird unter Decode-/Container-Budget rekursiv bis zur PE-Payload analysiert  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `10-15 capped`  
+**ExpectedCoreReasons:** `dec_zip,zip_nested_archive,zip_stored_payload,dec_pe`  
+
+Prüft die begrenzte stored ZIP-in-ZIP-Rekursion unter Decode- und Container-Budget bis zur PE-Klassifikation.
+
+## Test 68 – `test68_v47_sharedarraybuffer_timing.html`
+
+**Kategorie:** `V47_EVASION`  
+**Beschreibung:** SharedArrayBuffer + Atomics + performance.now als Sidechannel/Evasion-Indikator  
+**ExpectedDetection:** `YES`  
+**ExpectedScore:** `3-8`  
+**ExpectedCoreReasons:** `sharedarraybuffer_timing`  
+
+Prüft `SharedArrayBuffer` + `Atomics` + hochauflösende Zeitmessung als Evasion-/Sidechannel-Indikator.
 
 ---
 
-# Welche Bereiche benötigen weiterhin eine EML-/MIME-Suite?
+## v4.7.0-spezifische Bewertung
 
-| Bereich | Warum HTML allein nicht genügt |
-|---|---|
-| echte Attachment-Dateinamen | `att_script_attachment`, OneNote, Office-Macro-Container usw. hängen an MIME-Part-Metadaten |
-| MIME Content-Type | Blob-Typen in HTML sind keine echten Mail-Part Content-Types |
-| Attachment Magic vs. Dateiendung | benötigt echten Dateinamen plus echten Part-Inhalt |
-| Image Tail Carving | sollte zusätzlich mit echten PNG/JPEG/GIF/WebP-Mailparts getestet werden |
-| Newsletter-Erkennung | echte Header wie `List-Id`, `List-Unsubscribe`, `Precedence` fehlen in HTML-Dateien |
-| Trusted Sender / Domain Maps | benötigen echte Rspamd-Task- und Map-Konfiguration |
-| `image_smuggling_info` | basiert auf Attachment-Namen und Part-Inhalten |
+| Test | Schwerpunkt | Erwartung |
+|---:|---|---|
+| 57 | DOM Sink | Soft/Suspicious nur mit Payload-Kontext |
+| 58 | Dynamic Import | harter Script-Pfad |
+| 59 | Worker Blob | Suspicious + rekonstruierter Worker-Kontext |
+| 60 | ServiceWorker Scope | Suspicious + Evasion |
+| 61 | WebSocket Portscan | Evasion |
+| 62 | JSFuck | Obfuskation |
+| 63 | Unicode Escape | Obfuskation/Rekonstruktion |
+| 64 | Template Literal | Obfuskation |
+| 65 | ZIP Comment | Container/Soft + tatsächliche Payload-Klassifikation |
+| 66 | ZIP Entropie | Info |
+| 67 | ZIP-in-ZIP | begrenzte Container-Rekursion bis Payload |
+| 68 | SharedArrayBuffer Timing | Evasion |
 
-# Empfohlener Regression-Ablauf
+## Was weiterhin EML/MIME benötigt
 
-1. `rspamadm configtest` ausführen.
-2. Lua-Modul mit `test_mode = true` oder kontrollierter Testkonfiguration laden.
-3. Tests 36 und 37 zuerst als Negativkontrolle prüfen.
-4. Tests 01–15 als Kernregression ausführen.
-5. Tests 16–40 für die erweiterten Heuristiken ausführen.
-6. Tests 41–56 separat als v4.6.0-Regressionsblock ausführen.
-7. `ExpectedCoreReasons` und `ExpectedInfoReasons` mit den erzeugten Symbolen/Logs vergleichen.
-8. Score-Abweichungen nur dann als Fehler werten, wenn sie ausserhalb der vorgesehenen Bereiche liegen oder ein erwarteter Reason fehlt.
+- echte Attachment-Dateinamen und Content-Types
+- Magic-/Extension-Mismatch an echten Mailparts
+- Image-Tail-Carving an echten PNG/JPEG/GIF/WebP-Parts
+- Newsletter-Header und Trusted-Sender-Maps
+- realistische Multi-Part-Budgettests
 
-# Besonders wichtige v4.6.0-Regressionen
+## Empfohlener Ablauf
 
-Die folgenden Tests sollten bei jeder Änderung an Decode-, Script- oder Containerlogik zwingend mitlaufen:
+1. `rspamadm configtest`
+2. Negativtests 36–37 prüfen
+3. Kernregression 01–40
+4. v4.6-Regressionsblock 41–56
+5. v4.7-Regressionsblock 57–68
+6. Core-/Info-Reasons gegen Manifest vergleichen
+7. Score nur als Bereich bewerten; Reasons sind für Regression entscheidender
 
-- **41** – Script-Prescan / Magic-Priorisierung
-- **42** – Prescan-Budget
-- **43** – Hex-Uint8Array
-- **44** – Nested Base64
-- **46–54** – ZIP-Parser
-- **55** – XOR-Rekonstruktion
-- **56** – RC4-Rekonstruktion
+## Zusammengehörige Artefakte
 
-# Versionierung
-
-Empfohlene zusammengehörige Artefakte:
-
-- `html_smuggling.lua` – v4.6.0
-- `README_html_smuggling_v4.6.0.md`
-- `create_html_pattern_test_suite_v4_6_0_r1.ps1`
-- `Testmatrix_HTML_Smuggling_v4.6.0-r1.md`
-- `README_HTML_Smuggling_TestSuite_v4.6.0_01-56_detailed.md`
-- `HTML_Smuggling_v4.6.0_Tests_01-56.zip`
-
-Damit sind Implementierung, Testgenerator, Testmatrix, Einzeldaten und Dokumentation auf demselben Versionsstand.
+- `html_smuggling_v4.7.0.lua`
+- `README_html_smuggling_v4.7.0.md`
+- `HTML_Smuggling_v4.7.0_Tests_01-68.zip`
+- `README_HTML_Smuggling_TestSuite_v4.7.0_01-68_detailed.md`
