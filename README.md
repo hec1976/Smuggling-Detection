@@ -1,12 +1,12 @@
-# HTML Smuggling Detection v4.6.0
+# HTML Smuggling Detection v4.7.0
 
-![Version](https://img.shields.io/badge/Version-4.6.0-green)
+![Version](https://img.shields.io/badge/Version-4.7.0-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
 ![Security](https://img.shields.io/badge/Focus-HTML%20Smuggling%20%26%20Payload%20Detection-red)
 
 Rspamd-Lua-Modul zur Erkennung von **HTML Smuggling**, verschleierten JavaScript-Payloads, Base64-/Byte-Array-Staging sowie ergänzenden **Non-HTML- und Attachment-Vektoren**.
 
-Version **4.6.0** erweitert den Scanner vor allem bei **Ressourcensteuerung, Script-Prescan, ZIP-Inhaltsanalyse und begrenzter Crypto-Rekonstruktion**. Die bestehenden v4.5-Pfade für Magic-Prefixe, rekursives Decoding, Attachment-Magic-Prüfung und Image-Tail-Carving bleiben erhalten.
+Version **4.7.0** baut auf v4.6.0 auf und erweitert den Scanner gezielt bei **DOM-Sinks, Dynamic Imports, Worker-/ServiceWorker-Staging, moderner Evasion und begrenzter ZIP-Tiefenanalyse**. Die v4.6-Pfade für globale Budgets, Script-Prescan, strukturiertes ZIP-Parsing sowie XOR-/RC4-Rekonstruktion bleiben erhalten.
 
 ---
 
@@ -34,7 +34,59 @@ Das Ziel ist **keine vollständige forensische Dateianalyse**, sondern eine robu
 
 ---
 
-## Was ist neu in v4.6.0?
+## Was ist neu in v4.7.0?
+
+Die v4.7.0-Erweiterungen konzentrieren sich auf reale Lücken mit gutem Nutzen-/FP-Verhältnis:
+
+- **DOM Dynamic Sinks** im Payload-Kontext:
+  - `.innerHTML =`
+  - `.outerHTML =`
+  - `insertAdjacentHTML(...)`
+  - `document.write(...)`
+- **Dynamic `import()`**:
+  - `data:`-JavaScript
+  - `blob:`-JavaScript
+  - Blob/ObjectURL-basierte Import-Ketten
+- **Worker-Blob-Staging**:
+  - `new Worker(...)`
+  - Blob + `URL.createObjectURL()`
+  - begrenzte Rekonstruktion statischer Worker-Scriptstrings
+- **ServiceWorker-Kontext**:
+  - `navigator.serviceWorker.register(...)`
+  - Root-Scope bzw. auffällig breite Scope-Nutzung
+- **WebSocket-Portscan-Heuristik**:
+  - mehrere Ports
+  - Schleifen über Portlisten
+- **JSFuck-Erkennung** als Obfuskationssignal
+- **erweiterte Unicode-Escape-Rekonstruktion**:
+  - `\uXXXX`
+  - `\u{...}`
+  - bestehende `\xNN`-Dekodierung bleibt erhalten
+- **Template-Literal-Obfuskation** mit Exec-/Payload-Kontext
+- **ZIP-Kommentaranalyse** auf Script- und Base64-Payloads
+- **Entropie-Info** für unkomprimiert gespeicherte ZIP-Mitglieder
+- **begrenzte stored ZIP-in-ZIP-Rekursion** unter bestehenden Decode-/Container-Budgets
+- **SharedArrayBuffer + Atomics + Timing** als Evasion-/Sidechannel-Indikator
+
+Neue wichtige Reasons:
+
+- `dom_dynamic_sink`
+- `dynamic_import_data`
+- `dynamic_import_blob`
+- `worker_blob_stage`
+- `worker_inline_script`
+- `serviceworker_register`
+- `serviceworker_broad_scope`
+- `websocket_portscan`
+- `jsfuck_obfuscation`
+- `unicode_escape_payload`
+- `template_literal_obfuscation`
+- `zip_comment_payload`
+- `zip_high_entropy_member`
+- `sharedarraybuffer_timing`
+
+### Basis aus v4.6.0
+
 
 Die wichtigsten Erweiterungen gegenüber v4.5.0:
 
@@ -72,7 +124,7 @@ Die wichtigsten Erweiterungen gegenüber v4.5.0:
   - `rc4_constant_payload`
 - neue Info-Reasons für Ressourcenlimits und unvollständige ZIP-Auswertung
 
-Die v4.5-Erweiterungen bleiben vollständig Bestandteil von v4.6.0, insbesondere:
+Die v4.6- und v4.5-Erweiterungen bleiben vollständig Bestandteil von v4.7.0, insbesondere:
 
 - Base64 Magic-Prefix Fast-Path
 - priorisierte Base64-Kandidaten
@@ -554,6 +606,9 @@ limits {
 | `zip.max_total_uncompressed` | 64 MiB | Gesamtgrenze laut ZIP-Metadaten |
 | `zip.max_entry_uncompressed` | 16 MiB | Grenze pro ZIP-Mitglied |
 | `zip.max_stored_extract` | 512 KiB | maximale direkte Stored-Extraktion |
+| `zip.max_comment_bytes` | 8 KiB | maximal analysierter ZIP-Kommentar pro Eintrag |
+| `zip.entropy_min_bytes` | 512 B | Mindestgrösse für ZIP-Stored-Entropieprüfung |
+| `zip.entropy_high` | 7.3 | Info-Schwelle für hohe Entropie |
 | `zip.high_ratio` | 100 | Schwelle für auffälliges Kompressionsverhältnis |
 | `crypto.max_input_bytes` | 64 KiB | maximales Payloadmaterial für XOR/RC4 |
 | `crypto.max_key_bytes` | 64 | maximale statische Schlüssellänge |
@@ -918,7 +973,7 @@ Dadurch bleibt der Scanner auch bei grossen oder absichtlich problematischen Nac
 
 ### Budget- und Parser-Info-Reasons
 
-Wenn ein Schutzlimit erreicht wird, kann v4.6.0 unter anderem folgende Info-Reasons setzen:
+Wenn ein Schutzlimit erreicht wird oder eine ZIP-Metadaten-Heuristik greift, kann v4.7.0 unter anderem folgende Info-Reasons setzen:
 
 ```text
 global_runtime_budget
@@ -971,38 +1026,38 @@ Nicht oder nur eingeschränkt umgesetzt sind:
 - Headless-Navigation externer URLs
 - dynamische Analyse von Binärdateien
 - System-Call-/Behavior-Analyse
-- vollständige Archivrekursion
+- vollständige unbeschränkte Archivrekursion
 
 `image_smuggling_info` ist daher bewusst nur ein Hinweis-Modul. Das Image-Tail-Carving in `attachment_vectors` erkennt angehängte Inhalte, aber keine allgemeine Steganographie.
 
 ---
 
-## Test-Suite v4.6.0-r1
+## Test-Suite v4.7.0-r1
 
-Zum Modul gehört eine separate HTML-/Script-Pattern-Test-Suite:
+Zur v4.7.0-Linie gehört eine vollständige HTML-/Script-Regressionssuite mit **68 Testfällen**.
 
 ```text
-create_html_pattern_test_suite_v4_6_0_r1.ps1
+HTML_Smuggling_v4.7.0_Tests_01-68.zip
 ```
 
-Die Suite erzeugt **56 HTML-Testfälle** sowie CSV-/JSON-Manifeste. Sie deckt neben den bestehenden Pattern-Tests auch die neuen v4.6-Pfade ab, unter anderem:
+Tests **01–56** decken den bisherigen v4.6.0-Stand ab. Neu hinzugekommen sind:
 
-- Script-Prescan
-- Prescan-Budget
-- Nested Base64
-- hexadezimales `Uint8Array`
-- ZIP Executable / Script Member
-- ZIP Double Extension
-- ZIP Path Traversal
-- Nested ZIP
-- ZIP Encryption Flag
-- High Compression Ratio
-- ZIP mit vielen Einträgen
-- Stored PE im ZIP
-- konstante XOR→PE-Rekonstruktion
-- konstante RC4→PE-Rekonstruktion
+- **57** – DOM Dynamic Sink
+- **58** – Dynamic `import()` aus `data:`
+- **59** – Worker Blob + statische Worker-Script-Rekonstruktion
+- **60** – ServiceWorker `register()` + Root Scope
+- **61** – WebSocket-Portscan
+- **62** – JSFuck-Heuristik
+- **63** – Unicode-Escape-Rekonstruktion
+- **64** – Template-Literal-Obfuskation
+- **65** – ZIP-Kommentar-Payload
+- **66** – ZIP-Stored-Entry mit hoher Entropie
+- **67** – Stored ZIP-in-ZIP bis zur eingebetteten PE-Payload
+- **68** – SharedArrayBuffer/Atomics Timing
 
-Die HTML-Suite ersetzt **keine EML-Suite**. Tests, die echte MIME-Part-Dateinamen, MIME-Typen, Newsletter-Header, Maps oder echte Attachment-Strukturen benötigen, sollten separat als EML-Testfälle aufgebaut werden.
+Die Suite enthält CSV-/JSON-Manifeste mit `ExpectedDetection`, `ExpectedScore`, `ExpectedCoreReasons` und `ExpectedInfoReasons`.
+
+Die HTML-Suite ersetzt **keine EML-Suite**. Echte MIME-Part-Dateinamen, MIME-Typen, Newsletter-Header, Maps und reale Attachment-Strukturen sollten weiterhin separat mit EML-Testfällen geprüft werden.
 
 ---
 
@@ -1025,15 +1080,16 @@ Besonders riskante Dateitypen wie CHM, HTA, LNK, OneNote und Script-Dateien soll
 
 ## Kurzfazit
 
-**v4.6.0** erweitert die v4.5-Linie vor allem dort, wo ein produktiver Gateway-Scanner besonders robust sein muss:
+**v4.7.0** erweitert v4.6.0 gezielt dort, wo moderne Browser- und Containertechnik neue Ausweichpfade eröffnet:
 
-- globale Ressourcensteuerung pro Nachricht
-- günstiger Prescan vor teurer Script-Analyse
-- strukturierte ZIP-Auswertung statt reiner Magic-Erkennung
-- sicherheitsrelevante ZIP-Metadaten und Dateinamen
-- begrenzte Rekonstruktion statischer XOR-/RC4-Payloads
-- weiterhin harte Limits für Decode-, Container- und Script-Arbeit
+- DOM-Sinks und Dynamic Imports werden kontextabhängig erfasst
+- Worker- und ServiceWorker-Staging werden tiefer bewertet
+- WebSocket-Portscan und SharedArrayBuffer-Timing ergänzen die Evasion-Erkennung
+- JSFuck, Unicode-Escapes und Template Literals erweitern die Obfuskationssicht
+- ZIP-Kommentare und Stored-Entropie werden analysiert
+- stored ZIP-in-ZIP kann begrenzt rekursiv verfolgt werden
+- globale Budgets, Prescan, ZIP-Grenzen und Early Exit bleiben unverändert als Schutzmechanismen bestehen
 
-Die bestehenden Stärken aus v4.5.0 bleiben erhalten: Magic-Prefix-Priorisierung, rekursives Decoding, `Uint8Array`-Rekonstruktion, Attachment-Magic-Prüfung und Image-Tail-Carving.
+Die v4.6-Stärken bleiben erhalten: Magic-Prefix-Priorisierung, rekursives Base64-Decoding, `Uint8Array`-Rekonstruktion, strukturiertes ZIP-Parsing, Attachment-Magic-Prüfung, Image-Tail-Carving sowie XOR-/RC4-Rekonstruktion.
 
-Damit ist v4.6.0 ein deutlich vollständigerer Stand für einen **produktionsnahen Rspamd-Mail-Gateway-Betrieb**, ohne den Scanner in Richtung unkontrollierter Sandbox- oder Vollforensik zu verschieben.
+Damit ist v4.7.0 ein stärkerer **produktionsnaher Rspamd-Mail-Gateway-Stand**, ohne den Scanner in Richtung unbeschränkter Sandbox- oder Vollforensik zu verschieben.
