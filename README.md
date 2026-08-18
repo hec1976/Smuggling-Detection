@@ -1,26 +1,14 @@
-# HTML Smuggling Detection v4.7.1
+# HTML Smuggling Detection v4.8.1
 
-![Version](https://img.shields.io/badge/Version-4.7.0-green)
+![Version](https://img.shields.io/badge/Version-4.8.1-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
 ![Security](https://img.shields.io/badge/Focus-HTML%20Smuggling%20%26%20Payload%20Detection-red)
 
 Rspamd-Lua-Modul zur Erkennung von **HTML Smuggling**, verschleierten JavaScript-Payloads, Base64-/Byte-Array-Staging sowie ergänzenden **Non-HTML- und Attachment-Vektoren**.
 
-Version **4.7.0** baut auf v4.6.0 auf und erweitert den Scanner gezielt bei **DOM-Sinks, Dynamic Imports, Worker-/ServiceWorker-Staging, moderner Evasion und begrenzter ZIP-Tiefenanalyse**. Die v4.6-Pfade für globale Budgets, Script-Prescan, strukturiertes ZIP-Parsing sowie XOR-/RC4-Rekonstruktion bleiben erhalten.
+Version **4.8.1** baut auf der v4.6/v4.7-Linie auf und ergänzt moderne DOM-/Worker-/Import-Pfade, erweiterte ZIP-Analyse, score-unabhängiges Sandbox-Handoff und eine konfigurierbare Sandbox-Reason-Liste. Die bestehenden Pfade für Magic-Prefixe, rekursives Decoding, Attachment-Magic-Prüfung, Image-Tail-Carving, ZIP-Central-Directory-Parsing und statische XOR-/RC4-Rekonstruktion bleiben erhalten.
 
 ---
-
-## v4.7.1 Bugfix – rekursiver JavaScript-Deep-Scan
-
-v4.7.1 korrigiert die Scope-Bindung von `scan_v47_script_risk_module`.
-Die Funktion wird vor `scan_decoded_script_blob()` als Local vorab deklariert und später per
-`scan_v47_script_risk_module = function(...)` befüllt. Dadurch funktioniert der rekursive Pfad
-für dekodiertes JavaScript wieder zuverlässig.
-
-Der Regressionstest `test69_v471_recursive_decoded_js_scope_regression.html` prüft gezielt,
-dass ein Base64-dekodierter JavaScript-Payload den v4.7-Risk-Scanner erreicht und
-`dynamic_import_data` erzeugt.
-
 
 ## Zweck
 
@@ -46,106 +34,90 @@ Das Ziel ist **keine vollständige forensische Dateianalyse**, sondern eine robu
 
 ---
 
-## Was ist neu in v4.7.1?
+## Was ist neu bis v4.8.1?
 
-Die v4.7.1-Erweiterungen konzentrieren sich auf reale Lücken mit gutem Nutzen-/FP-Verhältnis:
+### v4.8.1
 
-- **DOM Dynamic Sinks** im Payload-Kontext:
-  - `.innerHTML =`
-  - `.outerHTML =`
-  - `insertAdjacentHTML(...)`
-  - `document.write(...)`
-- **Dynamic `import()`**:
-  - `data:`-JavaScript
-  - `blob:`-JavaScript
-  - Blob/ObjectURL-basierte Import-Ketten
-- **Worker-Blob-Staging**:
-  - `new Worker(...)`
-  - Blob + `URL.createObjectURL()`
-  - begrenzte Rekonstruktion statischer Worker-Scriptstrings
-- **ServiceWorker-Kontext**:
-  - `navigator.serviceWorker.register(...)`
-  - Root-Scope bzw. auffällig breite Scope-Nutzung
-- **WebSocket-Portscan-Heuristik**:
-  - mehrere Ports
-  - Schleifen über Portlisten
-- **JSFuck-Erkennung** als Obfuskationssignal
-- **erweiterte Unicode-Escape-Rekonstruktion**:
-  - `\uXXXX`
-  - `\u{...}`
-  - bestehende `\xNN`-Dekodierung bleibt erhalten
-- **Template-Literal-Obfuskation** mit Exec-/Payload-Kontext
-- **ZIP-Kommentaranalyse** auf Script- und Base64-Payloads
-- **Entropie-Info** für unkomprimiert gespeicherte ZIP-Mitglieder
-- **begrenzte stored ZIP-in-ZIP-Rekursion** unter bestehenden Decode-/Container-Budgets
-- **SharedArrayBuffer + Atomics + Timing** als Evasion-/Sidechannel-Indikator
+- `sandbox_escalation.reasons` als **exakter Config-Override**
+- `reasons` nicht gesetzt → konservative eingebaute Defaults
+- `reasons` gesetzt → Default-Liste wird vollständig ersetzt
+- `reasons = []` → gültig, aber kein Sandbox-Handoff-Trigger
+- unbekannte Reasons → Config-Validierungsfehler
+- ungültige Config → Hauptsymbol wird nicht registriert
+- Debug-Export zeigt Default-Set, effektives Set und Override-Status
+- Test 71 prüft `xor_constant_payload` per Override
+- Test 72 prüft Replace statt additive Semantik
 
-Neue wichtige Reasons:
+### v4.8.0
 
-- `dom_dynamic_sink`
-- `dynamic_import_data`
-- `dynamic_import_blob`
-- `worker_blob_stage`
-- `worker_inline_script`
-- `serviceworker_register`
-- `serviceworker_broad_scope`
-- `websocket_portscan`
-- `jsfuck_obfuscation`
-- `unicode_escape_payload`
-- `template_literal_obfuscation`
-- `zip_comment_payload`
-- `zip_high_entropy_member`
-- `sharedarraybuffer_timing`
+- score-unabhängiges Sandbox-Handoff
+- virtueller Marker `HTML_SMUGGLING_SANDBOX_CANDIDATE`
+- Marker-Score `0`
+- strukturierte Logzeile `HTML_SMUGGLING_SANDBOX_ESCALATION`
+- Handoff wird durch Reasons ausgelöst, nicht durch `final_score`
+- optionaler Header-Handoff über `milter_headers`
+- keine synchrone Sandbox-Ausführung im Rspamd-Worker
 
-### Basis aus v4.6.0
+Default-Reasons:
 
+```text
+wasm_staged_payload
+wasm_worker_stage
+worker_blob_stage
+worker_inline_script
+serviceworker_broad_scope
+websocket_portscan
+sharedarraybuffer_timing
+dynamic_import_data
+dynamic_import_blob
+antisandbox_webdriver
+hardware_check_evasion
+human_interaction_required
+```
 
-Die wichtigsten Erweiterungen gegenüber v4.5.0:
+### v4.7.1
 
-- **globales Nachrichtenbudget** für:
-  - maximale Laufzeit
-  - insgesamt verarbeitete Bytes
-  - Decode-Operationen
-  - Container-Operationen
-  - Script-Prescan-Anzahl und Prescan-Bytes
-- **billiger Vorscan aller Inline-Scripts**, bevor nur die interessantesten Scripts tief analysiert werden
-- Prescan kann Scripts mit Magic-Prefixen oder typischen PE-/ZIP-Bytefolgen erzwingen
-- **echtes ZIP-Parsing** von Central Directory und Local File Headers
-- ZIP-Mitglieder werden auf sicherheitsrelevante Eigenschaften geprüft:
-  - ausführbare Dateien
-  - Script-Dateien
-  - verschachtelte Archive
-  - Double Extensions
-  - Path Traversal
-  - Encryption-Flag
-  - hohe Kompressionsraten
-  - sehr viele Einträge
-- unkomprimierte **stored ZIP-Mitglieder** können begrenzt extrahiert und erneut klassifiziert werden
-- **konstante XOR-Rekonstruktion** für statische Byte-/String-Payloads
-- **konstante RC4-Rekonstruktion** für statische Schlüssel und Payload-Kandidaten
-- neue Reasons wie:
-  - `script_prescan_payload`
-  - `zip_executable_member`
-  - `zip_script_member`
-  - `zip_nested_archive`
-  - `zip_encrypted`
-  - `zip_double_extension`
-  - `zip_path_traversal`
-  - `zip_stored_payload`
-  - `xor_constant_payload`
-  - `rc4_constant_payload`
-- neue Info-Reasons für Ressourcenlimits und unvollständige ZIP-Auswertung
+v4.7.1 korrigierte den Forward-Declaration-/Scope-Pfad für
+`scan_v47_script_risk_module`. Dadurch funktioniert der rekursive JS-Deep-Scan
+für dekodierte JavaScript-Payloads wieder zuverlässig.
 
-Die v4.6- und v4.5-Erweiterungen bleiben vollständig Bestandteil von v4.7.1, insbesondere:
+Test 69 prüft:
 
-- Base64 Magic-Prefix Fast-Path
-- priorisierte Base64-Kandidaten
-- rekursives Base64-Decoding bis Tiefe 3
-- hexadezimale und dezimale `Uint8Array`-Payloads
-- zusätzliche Magic-Erkennung für GZIP, BZIP2, XZ, ZSTD und TAR
+```text
+Base64 -> decoded JS -> analyze_decoded_blob()
+       -> scan_decoded_script_blob()
+       -> scan_v47_script_risk_module()
+```
+
+### v4.7.0
+
+- DOM-Sinks: `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`
+- Dynamic `import()` über `data:` und `blob:`
+- Worker-Blob-Staging
+- begrenzte statische Worker-Script-Rekonstruktion
+- ServiceWorker `register()` und breite Scope-Heuristik
+- WebSocket-Portscan-Heuristik
+- JSFuck-Erkennung
+- erweiterte Unicode-Escape-Rekonstruktion
+- Template-Literal-Obfuskation
+- ZIP-Kommentaranalyse
+- Entropie-Hinweise für stored ZIP-Mitglieder
+- begrenzte stored ZIP-in-ZIP-Rekursion
+- `SharedArrayBuffer` + `Atomics` + Timing-Kontext
+
+### v4.6.0
+
+- globales Nachrichtenbudget für Laufzeit, Bytes, Decode- und Container-Operationen
+- Script-Prescan aller Inline-Scripts
+- Priorisierung von Magic-Prefix-Payloads
+- ZIP-Central-Directory-/Local-Header-Parsing
+- ZIP-Dateinamen/Flags/Grössen/Path-Traversal/Encryption
+- stored ZIP-Mitglieder begrenzt extrahieren
+- konstante XOR-Rekonstruktion
+- konstante RC4-Rekonstruktion
+- rekursives Base64-Decoding
 - Attachment-Magic-/Dateiendungs-Abgleich
-- Image-Tail-Carving für PNG, JPEG, GIF und WebP
-- priorisierte Tiefenanalyse von standardmässig bis zu 5 Scripts
+- Image-Tail-Carving
 
 ---
 
@@ -274,7 +246,7 @@ Wird dort ein weiterer erkennbarer Payload gefunden, entsteht der Grund:
 
 ### 10. ZIP-Analyse
 
-ZIP-Container werden in v4.6.0 nicht nur am Magic erkannt. Der Scanner liest begrenzt das Central Directory bzw. Local Headers und klassifiziert Einträge nach Dateiname, Flags und Grössen.
+ZIP-Container werden seit v4.6.0 nicht nur am Magic erkannt. Der Scanner liest begrenzt das Central Directory bzw. Local Headers und klassifiziert Einträge nach Dateiname, Flags und Grössen.
 
 Erkannt werden unter anderem:
 
@@ -287,16 +259,102 @@ Erkannt werden unter anderem:
 - auffällig hohe Kompressionsverhältnisse
 - zu viele Einträge
 - gespeicherte, unkomprimierte Payloads, die direkt erneut klassifiziert werden können
+- ZIP-Kommentare mit Script-/Base64-Kontext
+- hochentropische stored Mitglieder als Info-Reason
+- begrenzte stored ZIP-in-ZIP-Rekursion
 
-### 11. Scoring und Marker
+Die Rekursion bleibt unter den globalen Decode-/Container-Budgets und ist bewusst
+kein vollständiger Archiv-Entpacker.
+
+### 11. Moderne Script-/Browser-Risikopfade
+
+Seit v4.7.x existiert zusätzlich ein gezielter Risk-Scanner für moderne Browserpfade:
+
+- dynamische DOM-Sinks
+- `import('data:...')`
+- `import('blob:...')`
+- Worker aus Blob/ObjectURL
+- statische Worker-Scriptstrings
+- ServiceWorker-Registrierungen
+- breite ServiceWorker-Scopes
+- mehrere WebSocket-Ports/Targets
+- JSFuck-artige Konstruktionen
+- Unicode-Escape-Payloads
+- Template-Literal-Obfuskation
+- `SharedArrayBuffer`/`Atomics` mit Timing-Kontext
+
+Diese APIs werden nicht pauschal als kritisch bewertet; die Erkennung versucht
+Payload-/Exec-Kontext einzubeziehen.
+
+### 12. Scoring und Marker
 
 Alle Reasons werden einer festen Policy-Klasse zugeordnet. Daraus werden Score, Caps, Marker und Ergebnistext berechnet.
+
+
+### 13. Sandbox-Handoff
+
+Nach der Detection prüft v4.8.x unabhängig vom Endscore, ob einer der effektiven
+Sandbox-Reasons vorhanden ist.
+
+Der Handoff setzt:
+
+```text
+HTML_SMUGGLING_SANDBOX_CANDIDATE
+```
+
+Der Marker ist ein virtuelles Symbol mit **Score 0**.
+
+Optional wird zusätzlich geschrieben:
+
+```text
+HTML_SMUGGLING_SANDBOX_ESCALATION || v=4.8.1 || score=... || payload=... || reasons=... || newsletter=... || dur_ms=...
+```
+
+### 14. Config-Validierung
+
+Die Konfiguration wird vor der Symbolregistrierung geprüft. Ungültige Limits,
+Module oder Sandbox-Reasons führen zu `CONFIG_OK = false`.
+
+Seit v4.8.1 gilt:
+
+```text
+ENABLED=true + CONFIG_OK=false -> Hauptsymbol wird nicht registriert
+```
+
+### 15. Externe Weiterverarbeitung
+
+Detection und Sandbox-Ausführung sind bewusst getrennt.
+
+Empfohlen:
+
+```text
+Rspamd
+  -> HTML_SMUGGLING_SANDBOX_CANDIDATE
+  -> optional X-HEC-Sandbox-Queue: 1
+  -> externe Queue / Consumer
+  -> CAPE / Sandbox
+  -> SIEM / Loki / Grafana
+```
+
+Der Lua-Scanner wartet nicht synchron auf eine Sandbox.
 
 ---
 
 ## Erkennungsbereiche
 
 ### HTML und JavaScript
+
+Zusätzlich zu den klassischen Smuggling-Pfaden:
+
+- DOM-Sinks im Payload-Kontext
+- Dynamic Import `data:` / `blob:`
+- Worker-Blob-Staging
+- ServiceWorker-Registrierung und Scope
+- WebSocket-Portscan
+- JSFuck
+- Unicode-Escape-Payloads
+- Template-Literal-Obfuskation
+- SharedArrayBuffer-/Atomics-Timing
 
 - HTML Smuggling
 - Base64-Staging
@@ -409,6 +467,9 @@ Erkannt werden unter anderem:
 - hohe Kompressionsraten
 - sehr viele Einträge
 - Stored-Payload-Extraktion und erneute Klassifikation
+- ZIP-Kommentar-Payloads
+- High-Entropy-Info für stored Mitglieder
+- begrenzte stored ZIP-in-ZIP-Rekursion
 
 ### Zertifikats- und PKCS-Kontexte
 
@@ -618,15 +679,34 @@ limits {
 | `zip.max_total_uncompressed` | 64 MiB | Gesamtgrenze laut ZIP-Metadaten |
 | `zip.max_entry_uncompressed` | 16 MiB | Grenze pro ZIP-Mitglied |
 | `zip.max_stored_extract` | 512 KiB | maximale direkte Stored-Extraktion |
-| `zip.max_comment_bytes` | 8 KiB | maximal analysierter ZIP-Kommentar pro Eintrag |
-| `zip.entropy_min_bytes` | 512 B | Mindestgrösse für ZIP-Stored-Entropieprüfung |
-| `zip.entropy_high` | 7.3 | Info-Schwelle für hohe Entropie |
 | `zip.high_ratio` | 100 | Schwelle für auffälliges Kompressionsverhältnis |
 | `crypto.max_input_bytes` | 64 KiB | maximales Payloadmaterial für XOR/RC4 |
 | `crypto.max_key_bytes` | 64 | maximale statische Schlüssellänge |
 | `crypto.max_candidates` | 4 | maximale Crypto-Kandidaten |
 
 ---
+
+
+### Zusätzliche ZIP-Limits seit v4.7
+
+```lua
+zip {
+  max_entries            = 256;
+  max_central_bytes      = 512 * 1024;
+  max_total_uncompressed = 64 * 1024 * 1024;
+  max_entry_uncompressed = 16 * 1024 * 1024;
+  max_stored_extract     = 512 * 1024;
+  max_member_name        = 1024;
+  max_comment_bytes      = 8 * 1024;
+  entropy_min_bytes      = 512;
+  entropy_high           = 7.3;
+  high_ratio             = 100;
+}
+```
+
+`max_comment_bytes` begrenzt ZIP-Kommentare. `entropy_min_bytes` und
+`entropy_high` steuern `zip_high_entropy_member`.
+
 
 ## Thresholds
 
@@ -713,6 +793,89 @@ html_smuggling {
 | `decode_debug` | `false` | detailliertes Decode-Logging |
 
 ---
+
+
+## Sandbox-Eskalationskonfiguration
+
+### Default
+
+```ucl
+sandbox_escalation {
+  enabled = true;
+  log = true;
+}
+```
+
+Wenn `reasons` fehlt, gelten die eingebauten konservativen Default-Reasons.
+
+### Exakter Override
+
+```ucl
+sandbox_escalation {
+  enabled = true;
+  log = true;
+
+  reasons = [
+    "xor_constant_payload",
+    "rc4_constant_payload"
+  ];
+}
+```
+
+Sobald `reasons` gesetzt ist, wird die eingebaute Liste **vollständig ersetzt**.
+
+### Erweiterter Override
+
+```ucl
+sandbox_escalation {
+  enabled = true;
+  log = true;
+
+  reasons = [
+    "wasm_staged_payload",
+    "wasm_worker_stage",
+    "worker_blob_stage",
+    "worker_inline_script",
+    "serviceworker_broad_scope",
+    "websocket_portscan",
+    "sharedarraybuffer_timing",
+    "dynamic_import_data",
+    "dynamic_import_blob",
+    "antisandbox_webdriver",
+    "hardware_check_evasion",
+    "human_interaction_required",
+    "wasm_inline_stage",
+    "blockchain_staged_payload",
+    "xor_constant_payload",
+    "rc4_constant_payload"
+  ];
+}
+```
+
+### Leere Liste
+
+```ucl
+sandbox_escalation {
+  enabled = true;
+  log = true;
+  reasons = [];
+}
+```
+
+Die normale Detection bleibt aktiv; kein Reason setzt jedoch den Sandbox-Marker.
+
+### Validierung
+
+Ungültig sind unter anderem:
+
+- `sandbox_escalation` ist kein Table
+- `enabled` oder `log` ist nicht boolean
+- `reasons` ist keine numerische Liste
+- leere/non-string Listeneinträge
+- unbekannte Reasons
+
+Unbekannte Reasons werden gegen `REASON_MODULE_MAP` validiert.
+
 
 ## Modulkonfiguration
 
@@ -850,6 +1013,31 @@ systemctl restart rspamd
 
 ---
 
+
+## Optionaler Header-Handoff
+
+Im Paket liegt:
+
+```text
+milter_headers_html_smuggling_sandbox_v4.8.1.conf.example
+```
+
+Das Beispiel übersetzt:
+
+```text
+HTML_SMUGGLING_SANDBOX_CANDIDATE
+```
+
+in:
+
+```text
+X-HEC-Sandbox-Queue: 1
+```
+
+Das Beispiel muss in eine bestehende `milter_headers`-Konfiguration integriert
+werden, wenn dort bereits eigene `use`-/`custom`-Routinen existieren.
+
+
 ## Empfohlene Inbetriebnahme
 
 Für einen kontrollierten Rollout:
@@ -907,6 +1095,7 @@ HTML_SMUGGLING_MARKER_PDF_ACTIVE
 HTML_SMUGGLING_MARKER_SVG_ACTIVE
 HTML_SMUGGLING_MARKER_CERT_SMUGGLING
 HTML_SMUGGLING_MARKER_PUSH_ABUSE
+HTML_SMUGGLING_SANDBOX_CANDIDATE
 ```
 
 ---
@@ -985,7 +1174,7 @@ Dadurch bleibt der Scanner auch bei grossen oder absichtlich problematischen Nac
 
 ### Budget- und Parser-Info-Reasons
 
-Wenn ein Schutzlimit erreicht wird oder eine ZIP-Metadaten-Heuristik greift, kann v4.7.1 unter anderem folgende Info-Reasons setzen:
+Wenn ein Schutzlimit erreicht wird, kann v4.8.1 unter anderem folgende Info-Reasons setzen:
 
 ```text
 global_runtime_budget
@@ -999,6 +1188,7 @@ decode_depth_limit
 zip_parse_incomplete
 zip_high_compression_ratio
 zip_many_entries
+zip_high_entropy_member
 ```
 
 Diese Gründe sind wichtig für Performance-Monitoring und die Bewertung, ob ein Scan wegen eines Limits nur teilweise durchgeführt wurde.
@@ -1019,6 +1209,10 @@ Besonders beobachten:
 - Zertifikats-/PKI-Mails
 - technische Monitoring-Mails
 - legitime Office-Makrocontainer
+- legitime Worker-/ServiceWorker-Web-Apps
+- Entwickler-/Diagnosecode mit `navigator.webdriver`
+- WebSocket-Webanwendungen
+- JavaScript-Frameworks mit dynamischen Imports
 
 Die Bewertung sollte immer zusammen mit den gesetzten Reasons, Klassen und Markern erfolgen.
 
@@ -1038,38 +1232,63 @@ Nicht oder nur eingeschränkt umgesetzt sind:
 - Headless-Navigation externer URLs
 - dynamische Analyse von Binärdateien
 - System-Call-/Behavior-Analyse
-- vollständige unbeschränkte Archivrekursion
+- vollständige Archivrekursion
+- echte Browserausführung
+- tatsächliche Spectre-/Sidechannel-Ausführung
+- vollständige WebGPU-/WebNN-/WebCodecs-Forensik
+- automatische Sandbox-Detonation im Rspamd-Worker
 
 `image_smuggling_info` ist daher bewusst nur ein Hinweis-Modul. Das Image-Tail-Carving in `attachment_vectors` erkennt angehängte Inhalte, aber keine allgemeine Steganographie.
 
 ---
 
-## Test-Suite v4.7.1-r1
+## Test-Suite v4.8.1-r1
 
-Zur v4.7.1-Linie gehört eine vollständige HTML-/Script-Regressionssuite mit **68 Testfällen**.
+PowerShell-Generator:
 
 ```text
-HTML_Smuggling_v4.7.1_Tests_01-68.zip
+create_html_pattern_test_suite_v4_8_1_r1.ps1
 ```
 
-Tests **01–56** decken den bisherigen v4.6.0-Stand ab. Neu hinzugekommen sind:
+Er erzeugt:
 
-- **57** – DOM Dynamic Sink
-- **58** – Dynamic `import()` aus `data:`
-- **59** – Worker Blob + statische Worker-Script-Rekonstruktion
-- **60** – ServiceWorker `register()` + Root Scope
-- **61** – WebSocket-Portscan
-- **62** – JSFuck-Heuristik
-- **63** – Unicode-Escape-Rekonstruktion
-- **64** – Template-Literal-Obfuskation
-- **65** – ZIP-Kommentar-Payload
-- **66** – ZIP-Stored-Entry mit hoher Entropie
-- **67** – Stored ZIP-in-ZIP bis zur eingebetteten PE-Payload
-- **68** – SharedArrayBuffer/Atomics Timing
+- 72 HTML-Testdateien
+- vollständiges `README.md`
+- `test_manifest_01-72.csv`
+- `test_manifest_01-72.json`
+- vier Sandbox-Configprofile
+- automatisches ZIP
 
-Die Suite enthält CSV-/JSON-Manifeste mit `ExpectedDetection`, `ExpectedScore`, `ExpectedCoreReasons` und `ExpectedInfoReasons`.
+Testblöcke:
 
-Die HTML-Suite ersetzt **keine EML-Suite**. Echte MIME-Part-Dateinamen, MIME-Typen, Newsletter-Header, Maps und reale Attachment-Strukturen sollten weiterhin separat mit EML-Testfällen geprüft werden.
+- 01–40: klassische HTML-/JS-/Attachment-/Evasion-Pfade
+- 41–56: v4.6 Prescan, ZIP, Crypto
+- 57–68: v4.7 DOM/Worker/ZIP/Evasion
+- 69: v4.7.1 rekursiver JS-Scope
+- 70: v4.8 score-unabhängiger Sandbox-Handoff
+- 71: v4.8.1 Override nimmt XOR auf
+- 72: v4.8.1 Override ersetzt Defaults
+
+Sandbox-Profile:
+
+```text
+sandbox_escalation_default.conf.example
+sandbox_escalation_override_crypto.conf.example
+sandbox_escalation_override_extended.conf.example
+sandbox_escalation_empty.conf.example
+```
+
+Tests 01–70 verwenden Default-Konfiguration.
+
+Tests 71–72 verwenden:
+
+```text
+sandbox_escalation_override_crypto.conf.example
+```
+
+Die HTML-Suite ersetzt keine echte EML-/MIME-Suite. Separat geprüft werden
+sollten Attachment-Dateinamen, MIME-Typen, Newsletter-Header, Maps,
+Image-Tail-Carving in realen MIME-Parts und multipartweite Budgetfälle.
 
 ---
 
@@ -1083,6 +1302,8 @@ Sinnvolle Kombination:
 - Attachment-Policy
 - AV
 - Sandbox für tiefe Analyse
+- score-unabhängiges Handoff über `HTML_SMUGGLING_SANDBOX_CANDIDATE`
+- externe Queue/Consumer statt synchronem Sandbox-Aufruf
 - SIEM-/Logging-Anbindung
 - separates False-Positive-Monitoring
 
@@ -1092,16 +1313,143 @@ Besonders riskante Dateitypen wie CHM, HTA, LNK, OneNote und Script-Dateien soll
 
 ## Kurzfazit
 
-**v4.7.1** erweitert v4.6.0 gezielt dort, wo moderne Browser- und Containertechnik neue Ausweichpfade eröffnet:
+**v4.8.1** kombiniert:
 
-- DOM-Sinks und Dynamic Imports werden kontextabhängig erfasst
-- Worker- und ServiceWorker-Staging werden tiefer bewertet
-- WebSocket-Portscan und SharedArrayBuffer-Timing ergänzen die Evasion-Erkennung
-- JSFuck, Unicode-Escapes und Template Literals erweitern die Obfuskationssicht
-- ZIP-Kommentare und Stored-Entropie werden analysiert
-- stored ZIP-in-ZIP kann begrenzt rekursiv verfolgt werden
-- globale Budgets, Prescan, ZIP-Grenzen und Early Exit bleiben unverändert als Schutzmechanismen bestehen
+- klassische HTML-Smuggling-Erkennung
+- priorisierte Script-/Base64-Analyse
+- rekursive Payload-Klassifikation
+- Attachment-/Image-Inhaltsprüfung
+- strukturiertes ZIP-Parsing
+- XOR-/RC4-Rekonstruktion
+- moderne DOM-/Worker-/Import-/Evasion-Pfade
+- globale Laufzeit-/Byte-/Decode-/Container-Budgets
+- Reason-Policy-basiertes Scoring und Caps
+- score-unabhängiges Sandbox-Handoff
+- konfigurierbare Sandbox-Reason-Liste
+- harte Config-Validierung vor Symbolregistrierung
+- 72 HTML-Regressionsfälle
 
-Die v4.6-Stärken bleiben erhalten: Magic-Prefix-Priorisierung, rekursives Base64-Decoding, `Uint8Array`-Rekonstruktion, strukturiertes ZIP-Parsing, Attachment-Magic-Prüfung, Image-Tail-Carving sowie XOR-/RC4-Rekonstruktion.
+Der Scanner bleibt bewusst ein Mail-Gateway-Detektor und keine Sandbox.
+Tiefe dynamische Analyse wird über den virtuellen Handoff-Marker ausgelagert.
 
-Damit ist v4.7.1 ein stärkerer **produktionsnaher Rspamd-Mail-Gateway-Stand**, ohne den Scanner in Richtung unbeschränkter Sandbox- oder Vollforensik zu verschieben.
+---
+
+## Anhang A – v4.7+/v4.8-spezifische Reasons
+
+### Moderne JS-/DOM-/Worker-Pfade
+
+```text
+dom_dynamic_sink
+dynamic_import_data
+dynamic_import_blob
+worker_blob_stage
+worker_inline_script
+serviceworker_register
+```
+
+### Obfuskation
+
+```text
+jsfuck_obfuscation
+unicode_escape_payload
+template_literal_obfuscation
+xor_constant_payload
+rc4_constant_payload
+```
+
+### Evasion
+
+```text
+serviceworker_broad_scope
+websocket_portscan
+sharedarraybuffer_timing
+antisandbox_webdriver
+hardware_check_evasion
+human_interaction_required
+```
+
+### ZIP
+
+```text
+zip_executable_member
+zip_script_member
+zip_nested_archive
+zip_encrypted
+zip_double_extension
+zip_path_traversal
+zip_high_compression_ratio
+zip_many_entries
+zip_stored_payload
+zip_comment_payload
+zip_high_entropy_member
+```
+
+---
+
+## Anhang B – Default-Sandbox-Reasons
+
+```lua
+local DEFAULT_SANDBOX_ESCALATION_REASONS = {
+  wasm_staged_payload        = true,
+  wasm_worker_stage          = true,
+  worker_blob_stage          = true,
+  worker_inline_script       = true,
+  serviceworker_broad_scope  = true,
+  websocket_portscan         = true,
+  sharedarraybuffer_timing   = true,
+  dynamic_import_data        = true,
+  dynamic_import_blob        = true,
+  antisandbox_webdriver      = true,
+  hardware_check_evasion     = true,
+  human_interaction_required = true,
+}
+```
+
+---
+
+## Anhang C – empfohlene Betriebschecks
+
+```bash
+rspamadm configtest
+```
+
+Danach mindestens:
+
+1. Negativtests 36/37
+2. Kernpfad Test 01
+3. ZIP 46–54
+4. Crypto 55–56
+5. v4.7-Pfade 57–68
+6. Scope-Test 69
+7. Sandbox Default-Test 70
+8. Override-Tests 71–72
+
+Im Log beobachten:
+
+```text
+HTML_SMUGGLING_SCRIPT_ERROR
+HTML_SMUGGLING_SANDBOX_ESCALATION
+global_runtime_budget
+global_decode_budget
+global_container_budget
+zip_parse_incomplete
+```
+
+---
+
+## Anhang D – Artefakte v4.8.1-r1
+
+```text
+html_smuggling_v4.8.1.lua
+README_html_smuggling_v4.8.1.md
+README_HTML_Smuggling_TestSuite_v4.8.1_01-72_detailed.md
+README_HTML_Smuggling_v4.8.1_PACKAGE.md
+create_html_pattern_test_suite_v4_8_1_r1.ps1
+HTML_Smuggling_v4.8.1_Tests_01-72.zip
+milter_headers_html_smuggling_sandbox_v4.8.1.conf.example
+sandbox_escalation_default.conf.example
+sandbox_escalation_override_crypto.conf.example
+sandbox_escalation_override_extended.conf.example
+sandbox_escalation_empty.conf.example
+HTML_Smuggling_v4.8.1_complete_r1.zip
+```
