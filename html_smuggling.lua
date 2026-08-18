@@ -1,5 +1,5 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.7.0
+-- HTML Smuggling Detection v4.7.1
 --
 -- Refactor und Erweiterungen seit v4.3.5:
 --
@@ -69,6 +69,7 @@
 -- 64. Entropie-Info fuer unkomprimiert gespeicherte ZIP-Mitglieder
 -- 65. Begrenzte Rekursion fuer stored ZIP-in-ZIP unter Decode- und Container-Budgets
 -- 66. SharedArrayBuffer + Atomics + hochaufloesende Zeitmessung als Evasion-/Sidechannel-Indikator
+-- 67. v4.7.1: Forward-Declaration fuer scan_v47_script_risk_module repariert; rekursiver JS-Deep-Scan wieder funktionsfaehig
 
 -- Design:
 -- Die Struktur bleibt nah an v4.3.6d.
@@ -79,7 +80,7 @@
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.7.0"
+local VERSION = "4.7.1"
 
 -- =========================
 -- Config lesen
@@ -3010,6 +3011,7 @@ local collect_script_meta
 local scan_script_blocks
 local scan_decoded_payload_module
 local analyze_decoded_blob
+local scan_v47_script_risk_module
 
 function V47.bit_is_set(value, bit_index)
   value = tonumber(value) or 0
@@ -3619,7 +3621,7 @@ local function v47_worker_script_interesting(val)
          lc:find("createobjecturl", 1, true)
 end
 
-local function scan_v47_script_risk_module(ctx, script_raw)
+scan_v47_script_risk_module = function(ctx, script_raw)
   if not script_raw or #script_raw < 20 then return end
   local lc = script_raw:lower()
 
@@ -4919,6 +4921,8 @@ if DEBUG then
     advanced_deobfuscate = advanced_deobfuscate,
     base64_magic_hint = base64_magic_hint,
     sniff_decoded = sniff_decoded,
+    analyze_decoded_blob = analyze_decoded_blob,
+    scan_decoded_script_blob = scan_decoded_script_blob,
     parse_zip_entries = V47.parse_zip_entries,
     analyze_zip_container = V47.analyze_zip_container,
     reconstruct_constant_crypto = V47.reconstruct_constant_crypto,
