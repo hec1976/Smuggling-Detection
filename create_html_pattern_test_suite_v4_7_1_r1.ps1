@@ -1,37 +1,40 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Erzeugt die komplette HTML Smuggling Detection Test-Suite v4.7.0-r1 (Tests 01-68).
+  Erzeugt die komplette HTML Smuggling Detection Test-Suite v4.7.1-r1 (Tests 01-69).
 
 .DESCRIPTION
-  - 68 einzelne HTML-Testdateien
+  - 69 einzelne HTML-Testdateien
   - README.md
-  - test_manifest_01-68.csv
-  - test_manifest_01-68.json
+  - test_manifest_01-69.csv
+  - test_manifest_01-69.json
   - anschliessend automatische ZIP-Erstellung
+
+  Test 69 ist der Regressionstest fuer den v4.7.0 Forward-Declaration-/Scope-Bug
+  im rekursiven JavaScript-Deep-Scan.
 
   Die eingebetteten Payloads sind synthetische Regression-Testdaten.
   Es werden keine externen Downloads benoetigt.
 
 .EXAMPLE
-  .\create_html_pattern_test_suite_v4_7_0_r1.ps1
+  .\create_html_pattern_test_suite_v4_7_1_r1.ps1
 
 .EXAMPLE
-  .\create_html_pattern_test_suite_v4_7_0_r1.ps1 -OutputRoot C:\Temp\HTMLTests -Force
+  .\create_html_pattern_test_suite_v4_7_1_r1.ps1 -OutputRoot C:\Temp\HTMLTests -Force
 #>
 
 [CmdletBinding()]
 param(
-    [string]$OutputRoot = (Join-Path $PSScriptRoot 'HTML_Smuggling_v4.7.0_Tests_01-68'),
+    [string]$OutputRoot = (Join-Path $PSScriptRoot 'HTML_Smuggling_v4.7.1_Tests_01-69'),
     [switch]$Force
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$SuiteVersion = '4.7.0-r1'
-$ExpectedHtmlTests = 68
-$ExpectedFiles = 71
+$SuiteVersion = '4.7.1-r1'
+$ExpectedHtmlTests = 69
+$ExpectedFiles = 72
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     throw 'OutputRoot darf nicht leer sein.'
@@ -39,13 +42,14 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 
 $OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 
-if ((Test-Path -LiteralPath $OutputRoot) -and $Force) {
+if (Test-Path -LiteralPath $OutputRoot) {
+    if (-not $Force) {
+        throw "Zielordner existiert bereits: $OutputRoot. Mit -Force neu erstellen."
+    }
     Remove-Item -LiteralPath $OutputRoot -Recurse -Force
 }
 
-if (-not (Test-Path -LiteralPath $OutputRoot)) {
-    New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
-}
+New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
 
 function Write-EmbeddedFile {
     param(
@@ -62,17 +66,20 @@ $EmbeddedFiles = @(
     @{
         Name = 'README.md'
         Base64 = @'
-IyBIVE1MIFNtdWdnbGluZyBEZXRlY3Rpb24gdjQuNy4wIOKAkyBrb21wbGV0dGUgVGVzdHMgMDEgYmlzIDY4CgpEaWVzZSBTYW1tbHVuZyBlbnRow6RsdCBk
-aWUgdm9sbHN0w6RuZGlnZSBIVE1MLS9TY3JpcHQtUmVncmVzc2lvbnNzdWl0ZS4KCiMjIEJlc3RhbmQKLSBUZXN0cyAwMeKAkzU2OiB2NC42LjAtS2Vybi0g
-dW5kIEVyd2VpdGVydW5nc3Rlc3RzCi0gVGVzdHMgNTfigJM2ODogbmV1ZSB2NC43LjAtUmVncmVzc2lvbnNwZmFkZQoKIyMgTmV1IGluIHY0LjcuMAo1Ny4g
-RE9NIER5bmFtaWMgU2luawo1OC4gRHluYW1pYyBgaW1wb3J0KClgIGF1cyBgZGF0YTpgCjU5LiBXb3JrZXIgQmxvYiArIHN0YXRpc2NoZSBXb3JrZXItU2Ny
-aXB0LVJla29uc3RydWt0aW9uCjYwLiBTZXJ2aWNlV29ya2VyIGByZWdpc3RlcigpYCArIFJvb3QgU2NvcGUKNjEuIFdlYlNvY2tldC1Qb3J0c2Nhbgo2Mi4g
-SlNGdWNrLUhldXJpc3Rpawo2My4gVW5pY29kZS1Fc2NhcGUtUmVrb25zdHJ1a3Rpb24KNjQuIFRlbXBsYXRlLUxpdGVyYWwtT2JmdXNrYXRpb24KNjUuIFpJ
-UC1Lb21tZW50YXItUGF5bG9hZAo2Ni4gWklQLVN0b3JlZC1FbnRyeS1FbnRyb3BpZQo2Ny4gU3RvcmVkIFpJUC1pbi1aSVAgUmVrdXJzaW9uCjY4LiBTaGFy
-ZWRBcnJheUJ1ZmZlci9BdG9taWNzIFRpbWluZwoKRGllIGVpbmdlYmV0dGV0ZW4gQmluw6RyZGF0ZW4gc2luZCBzeW50aGV0aXNjaGUgVGVzdGRhdGVuIHVu
-ZCBrZWluZSBhdXNmw7xocmJhcmVuIFNjaGFkcHJvZ3JhbW1lLgoKRGllIFNvbGx3ZXJ0ZSBzdGVoZW4gaW4gYHRlc3RfbWFuaWZlc3RfMDEtNjguY3N2YCB1
-bmQgYHRlc3RfbWFuaWZlc3RfMDEtNjguanNvbmAuCgpFY2h0ZSBBdHRhY2htZW50LURhdGVpbmFtZW4sIE1JTUUtVHlwZW4sIE5ld3NsZXR0ZXItSGVhZGVy
-IHVuZCBSc3BhbWQtTWFwcyBiZW7DtnRpZ2VuIHdlaXRlcmhpbiBlaW5lIHNlcGFyYXRlIEVNTC0vTUlNRS1TdWl0ZS4K
+IyBIVE1MIFNtdWdnbGluZyBEZXRlY3Rpb24gdjQuNy4xIOKAkyBrb21wbGV0dGUgVGVzdHMgMDEgYmlzIDY5CgpEaWVzZSBTYW1tbHVuZyBlbnRow6RsdCBk
+aWUgdm9sbHN0w6RuZGlnZSBIVE1MLS9TY3JpcHQtUmVncmVzc2lvbi1TdWl0ZSBmw7xyIGBodG1sX3NtdWdnbGluZy5sdWFgIHY0LjcuMS4KCiMjIE5ldSBp
+biB2NC43LjEKCioqVGVzdCA2OSoqIGlzdCBlaW4gZ2V6aWVsdGVyIFJlZ3Jlc3Npb25zdGVzdCBmw7xyIGRlbiBMdWEtU2NvcGUtQnVnIGltIHJla3Vyc2l2
+ZW4gSmF2YVNjcmlwdC1EZWVwLVNjYW46CgpgQmFzZTY0IC0+IGFuYWx5emVfZGVjb2RlZF9ibG9iKGtpbmQ9IkpTIikgLT4gc2Nhbl9kZWNvZGVkX3Njcmlw
+dF9ibG9iKCkgLT4gc2Nhbl92NDdfc2NyaXB0X3Jpc2tfbW9kdWxlKClgCgpFcndhcnRldCB3ZXJkZW4gbWluZGVzdGVuczoKCi0gYGRlY19qc2AKLSBgZHlu
+YW1pY19pbXBvcnRfZGF0YWAKClZvciBkZW0gRml4IGtvbm50ZSBkZXIgQXVmcnVmIGF1ZiBkaWUgZ2xvYmFsZSwgbmljaHQgZ2VzZXR6dGUgVmFyaWFibGUg
+YHNjYW5fdjQ3X3NjcmlwdF9yaXNrX21vZHVsZWAKYXVmbMO2c2VuIHVuZCBtaXQgYGF0dGVtcHQgdG8gY2FsbCBhIG5pbCB2YWx1ZWAgYWJicmVjaGVuLiBE
+ZXIgRml4IHZlcndlbmRldCBudW4gZWluIGVjaHRlcyBGb3J3YXJkLURlY2xhcmUKdW5kIHdlaXN0IGRpZSBzcMOkdGVyZSBGdW5rdGlvbiBkaWVzZW0gTG9j
+YWwgenUuCgojIyBCZXN0YW5kCgotIFRlc3RzIDAx4oCTNTY6IHY0LjYtS2Vybi0gdW5kIEVyd2VpdGVydW5nc3Rlc3RzCi0gVGVzdHMgNTfigJM2ODogdjQu
+Ny1FcndlaXRlcnVuZ2VuCi0gVGVzdCA2OTogdjQuNy4xIFNjb3BlLS9SZWN1cnNpdmUtSlMtUmVncmVzc2lvbgoKRGllIGVpbmdlYmV0dGV0ZW4gQmluw6Ry
+ZGF0ZW4gc2luZCBzeW50aGV0aXNjaGUgVGVzdGRhdGVuIHVuZCBrZWluZSBhdXNmw7xocmJhcmVuIFNjaGFkcHJvZ3JhbW1lLgoKU29sbHdlcnRlOgotIGB0
+ZXN0X21hbmlmZXN0XzAxLTY5LmNzdmAKLSBgdGVzdF9tYW5pZmVzdF8wMS02OS5qc29uYAoKRWNodGUgQXR0YWNobWVudC1EYXRlaW5hbWVuLCBNSU1FLVR5
+cGVuLCBOZXdzbGV0dGVyLUhlYWRlciB1bmQgUnNwYW1kLU1hcHMgYmVuw7Z0aWdlbiB3ZWl0ZXJoaW4KZWluZSBzZXBhcmF0ZSBFTUwtL01JTUUtU3VpdGUu
+Cg==
 '@
     },
     @{
@@ -1566,7 +1573,25 @@ LmxvZyhkdCk7Cjwvc2NyaXB0PjwvYm9keT48L2h0bWw+Cg==
 '@
     },
     @{
-        Name = 'test_manifest_01-68.csv'
+        Name = 'test69_v471_recursive_decoded_js_scope_regression.html'
+        Base64 = @'
+PCFET0NUWVBFIGh0bWw+CjxodG1sPjxib2R5Pgo8c2NyaXB0Pgp2YXIgZW5jb2RlZCA9ICJkbUZ5SUcxaGNtdGxjaUE5SUNkeVpXTjFjbk5wZG1VdGFuTXRa
+R1ZsY0MxelkyRnVKenNLZG1GeUlHaGxiSEJsY2lBOUlHRjBiMklvSjFGVlNrUlNSVlpIVWpCb1NsTnJkRTFVVlRWUVZVWkdVMVV4VWxaV2JHUlpWMVp2UFNj
+cE93cHBiWEJ2Y25Rb0oyUmhkR0U2ZEdWNGRDOXFZWFpoYzJOeWFYQjBMR052Ym5OdmJHVXViRzluS0NKMk5EY3RjbVZqZFhKemFYWmxMV2x0Y0c5eWRDSXBK
+eWs3Q21abGRHTm9LQ2RvZEhSd2N6b3ZMMlY0WVcxd2JHVXVhVzUyWVd4cFpDOTBaV3hsYldWMGNuay9hV1E5SnlBcklHMWhjbXRsY2lrN0Nnb3ZLaUJ5Wldk
+eVpYTnphVzl1SUhCaFpHUnBibWM2SUhKbFkzVnljMmwyWlNCa1pXTnZaR1ZrSUVwVElIQmhkR2dnS2k4S0x5b2djbVZuY21WemMybHZiaUJ3WVdSa2FXNW5P
+aUJ5WldOMWNuTnBkbVVnWkdWamIyUmxaQ0JLVXlCd1lYUm9JQ292Q2k4cUlISmxaM0psYzNOcGIyNGdjR0ZrWkdsdVp6b2djbVZqZFhKemFYWmxJR1JsWTI5
+a1pXUWdTbE1nY0dGMGFDQXFMd292S2lCeVpXZHlaWE56YVc5dUlIQmhaR1JwYm1jNklISmxZM1Z5YzJsMlpTQmtaV052WkdWa0lFcFRJSEJoZEdnZ0tpOEtM
+eW9nY21WbmNtVnpjMmx2YmlCd1lXUmthVzVuT2lCeVpXTjFjbk5wZG1VZ1pHVmpiMlJsWkNCS1V5QndZWFJvSUNvdkNpOHFJSEpsWjNKbGMzTnBiMjRnY0dG
+a1pHbHVaem9nY21WamRYSnphWFpsSUdSbFkyOWtaV1FnU2xNZ2NHRjBhQ0FxTHdvdktpQnlaV2R5WlhOemFXOXVJSEJoWkdScGJtYzZJSEpsWTNWeWMybDJa
+U0JrWldOdlpHVmtJRXBUSUhCaGRHZ2dLaThLTHlvZ2NtVm5jbVZ6YzJsdmJpQndZV1JrYVc1bk9pQnlaV04xY25OcGRtVWdaR1ZqYjJSbFpDQktVeUJ3WVhS
+b0lDb3YiOwp2YXIgZGVjb2RlZCA9IGF0b2IoZW5jb2RlZCk7CnZhciBibG9iID0gbmV3IEJsb2IoW2RlY29kZWRdLCB7dHlwZTonYXBwbGljYXRpb24vamF2
+YXNjcmlwdCd9KTsKdmFyIHVybCA9IFVSTC5jcmVhdGVPYmplY3RVUkwoYmxvYik7CndpbmRvdy5fX3JlY3Vyc2l2ZV9qc19yZWdyZXNzaW9uID0gdXJsOwo8
+L3NjcmlwdD4KPC9ib2R5PjwvaHRtbD4K
+'@
+    },
+    @{
+        Name = 'test_manifest_01-69.csv'
         Base64 = @'
 77u/VGVzdCxGaWxlLENhdGVnb3J5LEV4cGVjdGVkU2NvcmUsRXhwZWN0ZWREZXRlY3Rpb24sRXhwZWN0ZWRDb3JlUmVhc29ucyxFeHBlY3RlZEluZm9SZWFz
 b25zLERlc2NyaXB0aW9uDQoxLHRlc3QwMV9iYXNpY19wZV9zbXVnZ2xpbmcuaHRtbCxKU19TTVVHR0xJTkcsOC0xMCBncm91cCBjYXBwZWQsWUVTLCJhdG9i
@@ -1682,11 +1707,14 @@ aXQgaG9oZXIgRW50cm9waWUgc2V0enQgZWluZW4gSW5mby1SZWFzb24NCjY3LHRlc3Q2N192NDdfbmVz
 X1JFQ1VSU0lPTiwxMC0xNSBjYXBwZWQsWUVTLCJkZWNfemlwLHppcF9uZXN0ZWRfYXJjaGl2ZSx6aXBfc3RvcmVkX3BheWxvYWQsZGVjX3BlIiwsU3RvcmVk
 IFpJUC1pbi1aSVAgd2lyZCB1bnRlciBEZWNvZGUtL0NvbnRhaW5lci1CdWRnZXQgcmVrdXJzaXYgYmlzIHp1ciBQRS1QYXlsb2FkIGFuYWx5c2llcnQNCjY4
 LHRlc3Q2OF92NDdfc2hhcmVkYXJyYXlidWZmZXJfdGltaW5nLmh0bWwsVjQ3X0VWQVNJT04sMy04LFlFUyxzaGFyZWRhcnJheWJ1ZmZlcl90aW1pbmcsLFNo
-YXJlZEFycmF5QnVmZmVyICsgQXRvbWljcyArIHBlcmZvcm1hbmNlLm5vdyBhbHMgU2lkZWNoYW5uZWwvRXZhc2lvbi1JbmRpa2F0b3INCg==
+YXJlZEFycmF5QnVmZmVyICsgQXRvbWljcyArIHBlcmZvcm1hbmNlLm5vdyBhbHMgU2lkZWNoYW5uZWwvRXZhc2lvbi1JbmRpa2F0b3INCjY5LHRlc3Q2OV92
+NDcxX3JlY3Vyc2l2ZV9kZWNvZGVkX2pzX3Njb3BlX3JlZ3Jlc3Npb24uaHRtbCxWNDcxX1JFQ1VSU0lWRV9KU19SRUdSRVNTSU9OLDgtMTUgY2FwcGVkLFlF
+UywiZGVjX2pzLGR5bmFtaWNfaW1wb3J0X2RhdGEiLCxSZWdyZXNzaW9uIGZ1ZXIgRm9yd2FyZC1EZWNsYXJhdGlvbjogQmFzZTY0LWRla29kaWVydGVzIEph
+dmFTY3JpcHQgbXVzcyBkZW4gdjQuNyBEZWVwLVNjYW4gb2huZSBTY29wZS1GZWhsZXIgZXJyZWljaGVuDQo=
 '@
     },
     @{
-        Name = 'test_manifest_01-68.json'
+        Name = 'test_manifest_01-69.json'
         Base64 = @'
 WwogIHsKICAgICJUZXN0IjogIjEiLAogICAgIkZpbGUiOiAidGVzdDAxX2Jhc2ljX3BlX3NtdWdnbGluZy5odG1sIiwKICAgICJDYXRlZ29yeSI6ICJKU19T
 TVVHR0xJTkciLAogICAgIkV4cGVjdGVkU2NvcmUiOiAiOC0xMCBncm91cCBjYXBwZWQiLAogICAgIkV4cGVjdGVkRGV0ZWN0aW9uIjogIllFUyIsCiAgICAi
@@ -1944,10 +1972,14 @@ UGF5bG9hZCBhbmFseXNpZXJ0IgogIH0sCiAgewogICAgIlRlc3QiOiAiNjgiLAogICAgIkZpbGUiOiAi
 aW1pbmcuaHRtbCIsCiAgICAiQ2F0ZWdvcnkiOiAiVjQ3X0VWQVNJT04iLAogICAgIkV4cGVjdGVkU2NvcmUiOiAiMy04IiwKICAgICJFeHBlY3RlZERldGVj
 dGlvbiI6ICJZRVMiLAogICAgIkV4cGVjdGVkQ29yZVJlYXNvbnMiOiAic2hhcmVkYXJyYXlidWZmZXJfdGltaW5nIiwKICAgICJFeHBlY3RlZEluZm9SZWFz
 b25zIjogIiIsCiAgICAiRGVzY3JpcHRpb24iOiAiU2hhcmVkQXJyYXlCdWZmZXIgKyBBdG9taWNzICsgcGVyZm9ybWFuY2Uubm93IGFscyBTaWRlY2hhbm5l
-bC9FdmFzaW9uLUluZGlrYXRvciIKICB9Cl0=
+bC9FdmFzaW9uLUluZGlrYXRvciIKICB9LAogIHsKICAgICJUZXN0IjogIjY5IiwKICAgICJGaWxlIjogInRlc3Q2OV92NDcxX3JlY3Vyc2l2ZV9kZWNvZGVk
+X2pzX3Njb3BlX3JlZ3Jlc3Npb24uaHRtbCIsCiAgICAiQ2F0ZWdvcnkiOiAiVjQ3MV9SRUNVUlNJVkVfSlNfUkVHUkVTU0lPTiIsCiAgICAiRXhwZWN0ZWRT
+Y29yZSI6ICI4LTE1IGNhcHBlZCIsCiAgICAiRXhwZWN0ZWREZXRlY3Rpb24iOiAiWUVTIiwKICAgICJFeHBlY3RlZENvcmVSZWFzb25zIjogImRlY19qcyxk
+eW5hbWljX2ltcG9ydF9kYXRhIiwKICAgICJFeHBlY3RlZEluZm9SZWFzb25zIjogIiIsCiAgICAiRGVzY3JpcHRpb24iOiAiUmVncmVzc2lvbiBmdWVyIEZv
+cndhcmQtRGVjbGFyYXRpb246IEJhc2U2NC1kZWtvZGllcnRlcyBKYXZhU2NyaXB0IG11c3MgZGVuIHY0LjcgRGVlcC1TY2FuIG9obmUgU2NvcGUtRmVobGVy
+IGVycmVpY2hlbiIKICB9Cl0=
 '@
     }
-)
 
 )
 
@@ -1973,7 +2005,7 @@ foreach ($f in $htmlFiles) {
     }
 }
 
-$missing = @(1..68 | Where-Object { $_ -notin $numbers })
+$missing = @(1..69 | Where-Object { $_ -notin $numbers })
 $duplicates = @($numbers | Group-Object | Where-Object { $_.Count -gt 1 })
 
 if ($missing.Count -gt 0) {
@@ -1984,31 +2016,20 @@ if ($duplicates.Count -gt 0) {
     throw "Doppelte Testnummern: $((@($duplicates | ForEach-Object { $_.Name })) -join ', ')"
 }
 
-$parent = Split-Path -Parent $OutputRoot
-$leaf   = Split-Path -Leaf $OutputRoot
-$ZipPath = Join-Path $parent 'HTML_Smuggling_v4.7.0_Tests_01-68.zip'
-
-if (Test-Path -LiteralPath $ZipPath) {
-    Remove-Item -LiteralPath $ZipPath -Force
+$zipPath = "$OutputRoot.zip"
+if (Test-Path -LiteralPath $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force
 }
 
-Push-Location $parent
-try {
-    Compress-Archive -Path $leaf -DestinationPath $ZipPath -CompressionLevel Optimal -Force
-}
-finally {
-    Pop-Location
-}
+Compress-Archive -Path (Join-Path $OutputRoot '*') -DestinationPath $zipPath -CompressionLevel Optimal
 
-$manifestCsv = Join-Path $OutputRoot 'test_manifest_01-68.csv'
-$manifestJson = Join-Path $OutputRoot 'test_manifest_01-68.json'
-
-Write-Host ''
-Write-Host "HTML Smuggling Test Suite $SuiteVersion erstellt."
-Write-Host "Tests       : $($htmlFiles.Count)"
-Write-Host "Gesamtdateien: $($allFiles.Count)"
-Write-Host "Ordner      : $OutputRoot"
-Write-Host "CSV Manifest: $manifestCsv"
-Write-Host "JSON Manifest: $manifestJson"
-Write-Host "ZIP         : $ZipPath"
-Write-Host ''
+Write-Host ""
+Write-Host "HTML Smuggling Test-Suite erfolgreich erstellt."
+Write-Host "Version : $SuiteVersion"
+Write-Host "Tests   : $($htmlFiles.Count)"
+Write-Host "Ordner  : $OutputRoot"
+Write-Host "ZIP     : $zipPath"
+Write-Host ""
+Write-Host "Regression Test 69:"
+Write-Host "  Base64 -> decoded JS -> scan_decoded_script_blob -> scan_v47_script_risk_module"
+Write-Host "  ExpectedCoreReasons: dec_js,dynamic_import_data"
