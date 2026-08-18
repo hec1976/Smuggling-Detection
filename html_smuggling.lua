@@ -1,5 +1,5 @@
 -- /etc/rspamd/lua.local.d/html_smuggling.lua
--- HTML Smuggling Detection v4.7.1
+-- HTML Smuggling Detection v4.8.1
 --
 -- Refactor und Erweiterungen seit v4.3.5:
 --
@@ -70,17 +70,23 @@
 -- 65. Begrenzte Rekursion fuer stored ZIP-in-ZIP unter Decode- und Container-Budgets
 -- 66. SharedArrayBuffer + Atomics + hochaufloesende Zeitmessung als Evasion-/Sidechannel-Indikator
 -- 67. v4.7.1: Forward-Declaration fuer scan_v47_script_risk_module repariert; rekursiver JS-Deep-Scan wieder funktionsfaehig
+-- 68. v4.8.0: Score-unabhaengiges Sandbox-Handoff fuer mehrstufige / evasive Reasons
+-- 69. Virtueller Marker HTML_SMUGGLING_SANDBOX_CANDIDATE als externes Pipeline-Signal
+-- 70. Strukturierte HTML_SMUGGLING_SANDBOX_ESCALATION Logzeile mit den ausloesenden Reasons
+-- 71. v4.8.1: sandbox_escalation.reasons als exakter Config-Override fuer die Handoff-Reasons
+-- 72. Unbekannte/ungueltige Sandbox-Reasons werden bei der Config-Validierung abgewiesen
+-- 73. Ungueltige Config registriert das Hauptsymbol nicht mehr; entspricht dem dokumentierten Verhalten
 
 -- Design:
 -- Die Struktur bleibt nah an v4.3.6d.
 -- HTML bleibt der Hauptpfad.
 -- Neue Attachment- und Zertifikats-Scanner ergaenzen den bestehenden Flow.
 -- Image Smuggling bleibt standardmaessig info_only.
--- v4.7.0 erweitert DOM-/Worker-/Import-Erkennung, moderne Evasion-Muster und die begrenzte ZIP-Tiefenanalyse.
+-- v4.8.1 macht die Sandbox-Handoff-Reasons optional per Config exakt ueberschreibbar.
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util   = require "rspamd_util"
-local VERSION = "4.7.1"
+local VERSION = "4.8.1"
 
 -- =========================
 -- Config lesen
@@ -115,10 +121,80 @@ local SAFE_PART_ACCESS          = (CFG.safe_part_access ~= false)
 local LOG_CONFIG_VALIDATION     = (CFG.log_config_validation ~= false)
 local STRICT_WEIGHT_VALIDATION  = (CFG.strict_weight_validation == true)
 local DECODE_DEBUG              = (CFG.decode_debug == true)
+
+local SANDBOX_CFG = (type(CFG.sandbox_escalation) == "table") and CFG.sandbox_escalation or {}
+local SANDBOX_ESCALATION_ENABLED = (SANDBOX_CFG.enabled ~= false)
+local SANDBOX_ESCALATION_LOG     = (SANDBOX_CFG.log ~= false)
+
 local RUNTIME_MAX_FINAL_SCORE = MAX_FINAL_SCORE
 local RUNTIME_SOFT_ONLY_CAP   = SOFT_ONLY_SCORE_CAP
 local RUNTIME_MIN_SCORE       = MIN_SCORE
 local RUNTIME_CRITICAL_BOOST  = CRITICAL_BOOST
+
+-- =========================
+-- Sandbox Escalation Handoff
+-- =========================
+local DEFAULT_SANDBOX_ESCALATION_REASONS = {
+  wasm_staged_payload        = true,
+  wasm_worker_stage          = true,
+  worker_blob_stage          = true,
+  worker_inline_script       = true,
+  serviceworker_broad_scope  = true,
+  websocket_portscan         = true,
+  sharedarraybuffer_timing   = true,
+  dynamic_import_data        = true,
+  dynamic_import_blob        = true,
+  antisandbox_webdriver      = true,
+  hardware_check_evasion     = true,
+  human_interaction_required = true,
+}
+
+local function copy_reason_set(src)
+  local out = {}
+  for reason, enabled in pairs(src or {}) do
+    if enabled then out[reason] = true end
+  end
+  return out
+end
+
+local function build_sandbox_escalation_reason_set()
+  -- reasons nicht gesetzt -> sichere eingebaute Defaults
+  if SANDBOX_CFG.reasons == nil then
+    return copy_reason_set(DEFAULT_SANDBOX_ESCALATION_REASONS), false
+  end
+
+  -- reasons gesetzt -> exakter Override. Validierung erfolgt spaeter zentral.
+  local out = {}
+  if type(SANDBOX_CFG.reasons) == "table" then
+    for _, reason in pairs(SANDBOX_CFG.reasons) do
+      if type(reason) == "string" then
+        reason = reason:match("^%s*(.-)%s*$") or ""
+        if reason ~= "" then out[reason] = true end
+      end
+    end
+  end
+  return out, true
+end
+
+local SANDBOX_ESCALATION_REASONS, SANDBOX_ESCALATION_REASONS_OVERRIDDEN =
+  build_sandbox_escalation_reason_set()
+
+local function sandbox_escalation_hits(ctx)
+  local hits = {}
+  if not SANDBOX_ESCALATION_ENABLED or not ctx or type(ctx.reasons) ~= "table" then
+    return false, hits
+  end
+  for reason in pairs(SANDBOX_ESCALATION_REASONS) do
+    if ctx.reasons[reason] then hits[#hits + 1] = reason end
+  end
+  table.sort(hits)
+  return (#hits > 0), hits
+end
+
+local function needs_sandbox_escalation(ctx)
+  local needed = sandbox_escalation_hits(ctx)
+  return needed
+end
 
 -- =========================
 -- Limits
@@ -906,6 +982,36 @@ local function validate_config_or_raise()
   if (LZIP.entropy_min_bytes or 0) < 64 then add_err("limits.zip.entropy_min_bytes ist zu klein") end
   if (LZIP.entropy_high or 0) < 0 or (LZIP.entropy_high or 0) > 8 then add_err("limits.zip.entropy_high muss zwischen 0 und 8 liegen") end
   if (LCRYPTO.max_key_bytes or 0) < 1 then add_err("limits.crypto.max_key_bytes muss >= 1 sein") end
+
+  if CFG.sandbox_escalation ~= nil and type(CFG.sandbox_escalation) ~= "table" then
+    add_err("sandbox_escalation ist kein table")
+  end
+  if SANDBOX_CFG.enabled ~= nil and type(SANDBOX_CFG.enabled) ~= "boolean" then
+    add_err("sandbox_escalation.enabled ist nicht boolean")
+  end
+  if SANDBOX_CFG.log ~= nil and type(SANDBOX_CFG.log) ~= "boolean" then
+    add_err("sandbox_escalation.log ist nicht boolean")
+  end
+  if SANDBOX_CFG.reasons ~= nil then
+    if type(SANDBOX_CFG.reasons) ~= "table" then
+      add_err("sandbox_escalation.reasons ist keine Liste")
+    else
+      for k, reason in pairs(SANDBOX_CFG.reasons) do
+        if type(k) ~= "number" then
+          add_err("sandbox_escalation.reasons muss eine numerische Liste sein")
+          break
+        elseif type(reason) ~= "string" or not reason:match("%S") then
+          add_err("sandbox_escalation.reasons enthaelt einen leeren oder nicht-string Reason")
+        else
+          local normalized = reason:match("^%s*(.-)%s*$") or ""
+          if not REASON_MODULE_MAP[normalized] then
+            add_err("sandbox_escalation.reasons unbekannter Reason: " .. tostring(normalized))
+          end
+        end
+      end
+    end
+  end
+
   if STRICT_WEIGHT_VALIDATION then
     for k, v in pairs(W or {}) do
       if tonumber(v) == nil then add_err("weight " .. tostring(k) .. " ist nicht numerisch")
@@ -4657,6 +4763,24 @@ end
 local function apply_markers(ctx)
   local task, reasons, info = ctx.task, ctx.reasons, ctx.info_reasons
 
+  local sandbox_needed, sandbox_hits = sandbox_escalation_hits(ctx)
+  ctx.sandbox_candidate = sandbox_needed
+  ctx.sandbox_reasons = sandbox_hits
+  if sandbox_needed then
+    task:insert_result("HTML_SMUGGLING_SANDBOX_CANDIDATE", 1.0)
+    if SANDBOX_ESCALATION_LOG then
+      rspamd_logger.infox(task, string.format(
+        "HTML_SMUGGLING_SANDBOX_ESCALATION || v=%s || score=%.2f || payload=%s || reasons=%s || newsletter=%s || dur_ms=%.2f",
+        VERSION,
+        tonumber(ctx.final_score) or 0,
+        safe_str(ctx.critical_kind or ctx.payload_kind or ctx.observed_kind, "none"),
+        table.concat(sandbox_hits, ","),
+        safe_str(ctx.newsletter, "false"),
+        tonumber(elapsed_ms(ctx.started_at)) or 0
+      ))
+    end
+  end
+
   if reasons["serviceworker_api"] or reasons["serviceworker_register"] or reasons["serviceworker_broad_scope"] then
     task:insert_result("HTML_SMUGGLING_MARKER_SERVICEWORKER", 1.0)
   end
@@ -4681,7 +4805,8 @@ local function apply_markers(ctx)
     task:insert_result("HTML_SMUGGLING_MARKER_GEO_TARGETING", 1.0)
   end
 
-  if reasons["antisandbox_webdriver"] or reasons["hardware_check_evasion"] or reasons["human_interaction_required"] then
+  if reasons["antisandbox_webdriver"] or reasons["hardware_check_evasion"] or reasons["human_interaction_required"] or
+     reasons["serviceworker_broad_scope"] or reasons["websocket_portscan"] or reasons["sharedarraybuffer_timing"] then
     task:insert_result("HTML_SMUGGLING_MARKER_EVASION", 1.0)
   end
 
@@ -4834,7 +4959,7 @@ if LOG_CONFIG_VALIDATION and (not CONFIG_OK) then rspamd_logger.errx("html_smugg
 -- =========================
 -- Symbole registrieren
 -- =========================
-if ENABLED then
+if ENABLED and CONFIG_OK then
   local smuggling_id = rspamd_config:register_symbol{
     name = "HTML_SMUGGLING_PAYLOAD",
     callback = detect_html_smuggling_payload,
@@ -4848,6 +4973,7 @@ if ENABLED then
     rspamd_config:register_symbol{ name = name, parent = smuggling_id, type = "virtual", score = 0.0, group = "phishing", description = desc }
   end
   reg_marker("HTML_SMUGGLING_TEST",                      "HTML smuggling test mode marker")
+  reg_marker("HTML_SMUGGLING_SANDBOX_CANDIDATE",         "HTML smuggling handoff: sandbox escalation candidate")
   reg_marker("HTML_SMUGGLING_MARKER_SERVICEWORKER",      "HTML smuggling marker: ServiceWorker API")
   reg_marker("HTML_SMUGGLING_MARKER_WEBCRYPTO",          "HTML smuggling marker: WebCrypto API")
   reg_marker("HTML_SMUGGLING_MARKER_QR_CANVAS",          "HTML smuggling marker: QR/Canvas lure")
@@ -4897,6 +5023,11 @@ if DEBUG then
   return {
     Detector = Detector,
     Policy = Policy,
+    needs_sandbox_escalation = needs_sandbox_escalation,
+    sandbox_escalation_hits = sandbox_escalation_hits,
+    DEFAULT_SANDBOX_ESCALATION_REASONS = DEFAULT_SANDBOX_ESCALATION_REASONS,
+    SANDBOX_ESCALATION_REASONS = SANDBOX_ESCALATION_REASONS,
+    SANDBOX_ESCALATION_REASONS_OVERRIDDEN = SANDBOX_ESCALATION_REASONS_OVERRIDDEN,
     scan_appinstaller_module = scan_appinstaller_module,
     scan_js_smuggling_html_module = scan_js_smuggling_html_module,
     scan_obfuscation_script_module = scan_obfuscation_script_module,
