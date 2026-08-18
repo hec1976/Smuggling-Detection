@@ -1,5 +1,5 @@
-# create_html_pattern_test_suite_v4_4_2_r1.ps1
-# Bereinigte HTML Pattern Test Suite fuer HTML Smuggling Detection v4.4.2-r1
+# create_html_pattern_test_suite_v4_6_0_r1.ps1
+# Erweiterte HTML Pattern Test Suite fuer HTML Smuggling Detection v4.6.0-r1
 #
 # Wichtig:
 #   Diese Suite testet bewusst nur HTML und Script Muster.
@@ -10,7 +10,8 @@
 #   - Decode Gates sicher erfuellen
 #   - schwache oder falsch gemappte Alt-Tests bereinigen
 #   - fehlende positive HTML Pattern Tests ergaenzen
-#   - realistische Manifest Daten mit ExpectedCoreReasons erzeugen
+#   - realistische Manifest Daten mit ExpectedCoreReasons und ExpectedInfoReasons erzeugen
+#   - v4.6.0 Script-Prescan, ZIP-Metadaten und konstante Crypto-Rekonstruktion testen
 #
 # Decode Gates aus der Lua Logik:
 #   LB64.min_len = 200
@@ -24,12 +25,12 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 Write-Host "╔══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   HTML Pattern Test Suite v4.4.2-r1                                                 ║" -ForegroundColor Cyan
-Write-Host "║   Fokus: HTML, Script, Decode, SVG Data URI, CSS, Geo, Evasion, ClickFix, Web3     ║" -ForegroundColor Cyan
+Write-Host "║   HTML Pattern Test Suite v4.6.0-r1                                                 ║" -ForegroundColor Cyan
+Write-Host "║   Fokus: HTML, Decode, Prescan, ZIP, XOR/RC4, SVG, CSS, Evasion, Web3     ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
-$testFolderName = 'HTML_Smuggling_HTMLPatternSuite_v4_4_2_r1'
+$testFolderName = 'HTML_Smuggling_HTMLPatternSuite_v4_6_0_r1'
 $outputRoot = Join-Path -Path (Get-Location).Path -ChildPath $testFolderName
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
@@ -389,6 +390,7 @@ function Add-TestFile {
     [Parameter(Mandatory)][string]$ExpectedScore,
     [Parameter(Mandatory)][string]$ExpectedDetection,
     [Parameter(Mandatory)][string]$ExpectedCoreReasons,
+    [string]$ExpectedInfoReasons = 'none',
     [Parameter(Mandatory)][string]$Description,
     [Parameter(Mandatory)][string]$Category,
     [Parameter(Mandatory)][string]$Content
@@ -399,10 +401,201 @@ function Add-TestFile {
     ExpectedScore = $ExpectedScore
     ExpectedDetection = $ExpectedDetection
     ExpectedCoreReasons = $ExpectedCoreReasons
+    ExpectedInfoReasons = $ExpectedInfoReasons
     Description = $Description
     Category = $Category
     Content = $Content
   }
+}
+
+# -----------------------------------------------------------------------------
+# v4.6.0 Helpers: ZIP Parser, Script Prescan und konstante Crypto Rekonstruktion
+# -----------------------------------------------------------------------------
+
+function Convert-BytesToJsArray {
+  param(
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [switch]$Hex
+  )
+
+  if ($Hex) {
+    return (($Bytes | ForEach-Object { '0x{0:X2}' -f $_ }) -join ',')
+  }
+  return (($Bytes | ForEach-Object { [string]$_ }) -join ',')
+}
+
+function Protect-XorBytes {
+  param(
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][byte]$Key
+  )
+
+  $out = New-Object byte[] $Bytes.Length
+  for ($i = 0; $i -lt $Bytes.Length; $i++) {
+    $out[$i] = [byte]($Bytes[$i] -bxor $Key)
+  }
+  return $out
+}
+
+function Invoke-Rc4Bytes {
+  param(
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][string]$Key
+  )
+
+  $keyBytes = [System.Text.Encoding]::ASCII.GetBytes($Key)
+  if ($keyBytes.Length -eq 0) { throw 'RC4 Key darf nicht leer sein' }
+
+  $sbox = New-Object int[] 256
+  for ($i = 0; $i -lt 256; $i++) { $sbox[$i] = $i }
+
+  $j = 0
+  for ($i = 0; $i -lt 256; $i++) {
+    $j = ($j + $sbox[$i] + $keyBytes[$i % $keyBytes.Length]) % 256
+    $tmp = $sbox[$i]; $sbox[$i] = $sbox[$j]; $sbox[$j] = $tmp
+  }
+
+  $out = New-Object byte[] $Bytes.Length
+  $i = 0
+  $j = 0
+  for ($n = 0; $n -lt $Bytes.Length; $n++) {
+    $i = ($i + 1) % 256
+    $j = ($j + $sbox[$i]) % 256
+    $tmp = $sbox[$i]; $sbox[$i] = $sbox[$j]; $sbox[$j] = $tmp
+    $k = $sbox[($sbox[$i] + $sbox[$j]) % 256]
+    $out[$n] = [byte]($Bytes[$n] -bxor $k)
+  }
+  return $out
+}
+
+function Write-Le16 {
+  param([Parameter(Mandatory)][System.IO.Stream]$Stream, [Parameter(Mandatory)][UInt16]$Value)
+  $b = [BitConverter]::GetBytes($Value)
+  if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($b) }
+  $Stream.Write($b, 0, $b.Length)
+}
+
+function Write-Le32 {
+  param([Parameter(Mandatory)][System.IO.Stream]$Stream, [Parameter(Mandatory)][UInt32]$Value)
+  $b = [BitConverter]::GetBytes($Value)
+  if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($b) }
+  $Stream.Write($b, 0, $b.Length)
+}
+
+function Write-ZipBytes {
+  param([Parameter(Mandatory)][System.IO.Stream]$Stream, [Parameter(Mandatory)][byte[]]$Bytes)
+  if ($Bytes.Length -gt 0) { $Stream.Write($Bytes, 0, $Bytes.Length) }
+}
+
+function New-ZipEntrySpec {
+  param(
+    [Parameter(Mandatory)][string]$Name,
+    [byte[]]$Data = ([byte[]]@()),
+    [UInt16]$Flags = 0,
+    [UInt16]$Method = 0,
+    [Nullable[UInt32]]$ReportedCompressed = $null,
+    [Nullable[UInt32]]$ReportedUncompressed = $null
+  )
+
+  [PSCustomObject]@{
+    Name = $Name
+    Data = $Data
+    Flags = $Flags
+    Method = $Method
+    ReportedCompressed = $ReportedCompressed
+    ReportedUncompressed = $ReportedUncompressed
+  }
+}
+
+function New-TestZipBytes {
+  param([Parameter(Mandatory)][object[]]$Entries)
+
+  $ms = New-Object System.IO.MemoryStream
+  $central = New-Object System.Collections.Generic.List[object]
+
+  try {
+    foreach ($entry in $Entries) {
+      [byte[]]$nameBytes = [System.Text.Encoding]::UTF8.GetBytes([string]$entry.Name)
+      [byte[]]$data = if ($null -eq $entry.Data) { [byte[]]@() } else { [byte[]]$entry.Data }
+      [UInt32]$comp = if ($null -ne $entry.ReportedCompressed) { [UInt32]$entry.ReportedCompressed } else { [UInt32]$data.Length }
+      [UInt32]$uncomp = if ($null -ne $entry.ReportedUncompressed) { [UInt32]$entry.ReportedUncompressed } else { [UInt32]$data.Length }
+      [UInt32]$localOffset = [UInt32]$ms.Position
+
+      Write-Le32 -Stream $ms -Value 0x04034B50
+      Write-Le16 -Stream $ms -Value 20
+      Write-Le16 -Stream $ms -Value ([UInt16]$entry.Flags)
+      Write-Le16 -Stream $ms -Value ([UInt16]$entry.Method)
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le32 -Stream $ms -Value 0
+      Write-Le32 -Stream $ms -Value $comp
+      Write-Le32 -Stream $ms -Value $uncomp
+      Write-Le16 -Stream $ms -Value ([UInt16]$nameBytes.Length)
+      Write-Le16 -Stream $ms -Value 0
+      Write-ZipBytes -Stream $ms -Bytes $nameBytes
+      Write-ZipBytes -Stream $ms -Bytes $data
+
+      $central.Add([PSCustomObject]@{
+        NameBytes = $nameBytes
+        Flags = [UInt16]$entry.Flags
+        Method = [UInt16]$entry.Method
+        Compressed = $comp
+        Uncompressed = $uncomp
+        Offset = $localOffset
+      }) | Out-Null
+    }
+
+    [UInt32]$centralOffset = [UInt32]$ms.Position
+    foreach ($entry in $central) {
+      Write-Le32 -Stream $ms -Value 0x02014B50
+      Write-Le16 -Stream $ms -Value 20
+      Write-Le16 -Stream $ms -Value 20
+      Write-Le16 -Stream $ms -Value $entry.Flags
+      Write-Le16 -Stream $ms -Value $entry.Method
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le32 -Stream $ms -Value 0
+      Write-Le32 -Stream $ms -Value $entry.Compressed
+      Write-Le32 -Stream $ms -Value $entry.Uncompressed
+      Write-Le16 -Stream $ms -Value ([UInt16]$entry.NameBytes.Length)
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le16 -Stream $ms -Value 0
+      Write-Le32 -Stream $ms -Value 0
+      Write-Le32 -Stream $ms -Value $entry.Offset
+      Write-ZipBytes -Stream $ms -Bytes $entry.NameBytes
+    }
+
+    [UInt32]$centralSize = [UInt32]($ms.Position - $centralOffset)
+    [UInt16]$count = [UInt16][Math]::Min($central.Count, 65535)
+
+    Write-Le32 -Stream $ms -Value 0x06054B50
+    Write-Le16 -Stream $ms -Value 0
+    Write-Le16 -Stream $ms -Value 0
+    Write-Le16 -Stream $ms -Value $count
+    Write-Le16 -Stream $ms -Value $count
+    Write-Le32 -Stream $ms -Value $centralSize
+    Write-Le32 -Stream $ms -Value $centralOffset
+    Write-Le16 -Stream $ms -Value 0
+
+    return $ms.ToArray()
+  }
+  finally {
+    $ms.Dispose()
+  }
+}
+
+function Convert-TestZipToBase64 {
+  param([Parameter(Mandatory)][object[]]$Entries)
+  return [Convert]::ToBase64String((New-TestZipBytes -Entries $Entries))
+}
+
+function New-PseudoGzipPayload {
+  $bytes = New-Object byte[] 420
+  $bytes[0] = 0x1F; $bytes[1] = 0x8B; $bytes[2] = 0x08; $bytes[3] = 0x00
+  for ($i = 4; $i -lt $bytes.Length; $i++) { $bytes[$i] = [byte](($i * 73 + 19) % 251) }
+  return [Convert]::ToBase64String($bytes)
 }
 
 Write-Host "Generiere Payloads..." -ForegroundColor Yellow
@@ -422,6 +615,73 @@ $UINT8ARRAY_LITERAL = New-LargeUint8ArrayLiteral -Count 1100
 $certPemB64 = Convert-TextToBase64MinSize -Text $CERT_PEM -MinimumBytes $TargetPayloadBytes
 $certPkcs7B64 = Convert-TextToBase64MinSize -Text $CERT_PKCS7 -MinimumBytes $TargetPayloadBytes
 
+
+# v4.6.0 Test-Payloads
+$PE_BYTES = [Convert]::FromBase64String($PE_BASE64)
+$PE_HEX_ARRAY = Convert-BytesToJsArray -Bytes $PE_BYTES -Hex
+$NESTED_PE_BASE64 = Convert-TextToBase64MinSize -Text $PE_BASE64 -MinimumBytes $TargetPayloadBytes
+$GZIP_BASE64 = New-PseudoGzipPayload
+
+$zipPad = New-Object byte[] 320
+for ($i = 0; $i -lt $zipPad.Length; $i++) { $zipPad[$i] = [byte](65 + ($i % 23)) }
+
+$ZIP_EXE_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name 'payload.exe' -Data $zipPad)
+)
+$ZIP_SCRIPT_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name 'stage.ps1' -Data $zipPad)
+)
+$ZIP_DOUBLE_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name 'invoice.pdf.exe' -Data $zipPad)
+)
+$ZIP_TRAVERSAL_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name '../dropper.ps1' -Data $zipPad)
+)
+$ZIP_NESTED_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name 'inner.zip' -Data $zipPad)
+)
+$ZIP_ENCRYPTED_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name 'locked.bin' -Data $zipPad -Flags 1)
+)
+$ZIP_HIGH_RATIO_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name 'huge.bin' -Data ([byte[]](1..16)) -Method 8 -ReportedCompressed ([UInt32]16) -ReportedUncompressed ([UInt32](2 * 1024 * 1024)))
+)
+$ZIP_STORED_PE_BASE64 = Convert-TestZipToBase64 -Entries @(
+  (New-ZipEntrySpec -Name 'payload.bin' -Data $PE_BYTES -Method 0)
+)
+
+$manyEntries = New-Object System.Collections.Generic.List[object]
+for ($i = 0; $i -lt 257; $i++) {
+  $manyEntries.Add((New-ZipEntrySpec -Name ("item_{0:D3}.txt" -f $i) -Data ([byte[]](65,66,67,68)))) | Out-Null
+}
+$ZIP_MANY_BASE64 = Convert-TestZipToBase64 -Entries $manyEntries.ToArray()
+
+$XOR_KEY = [byte]0x23
+$XOR_PE_BYTES = Protect-XorBytes -Bytes $PE_BYTES -Key $XOR_KEY
+$XOR_PE_ARRAY = Convert-BytesToJsArray -Bytes $XOR_PE_BYTES
+
+$RC4_KEY = 'testkey'
+$RC4_PE_BYTES = Invoke-Rc4Bytes -Bytes $PE_BYTES -Key $RC4_KEY
+$RC4_PE_ARRAY = Convert-BytesToJsArray -Bytes $RC4_PE_BYTES
+
+$prescanLateBuilder = New-Object System.Text.StringBuilder
+[void]$prescanLateBuilder.AppendLine('<!DOCTYPE html><html><body>')
+for ($i = 1; $i -le 7; $i++) {
+  [void]$prescanLateBuilder.AppendLine("<script>var filler$i = 'normal-script-$i-abcdefghijklmnopqrstuvwxyz'; console.log(filler$i);</script>")
+}
+[void]$prescanLateBuilder.AppendLine("<script>var latePayload='$PE_BASE64'; var d=atob(latePayload); var b=new Blob([d]); var u=URL.createObjectURL(b); window.__late=u;</script>")
+[void]$prescanLateBuilder.AppendLine('</body></html>')
+$PRESCAN_LATE_HTML = $prescanLateBuilder.ToString()
+
+$prescanBudgetBuilder = New-Object System.Text.StringBuilder
+[void]$prescanBudgetBuilder.AppendLine('<!DOCTYPE html><html><body>')
+[void]$prescanBudgetBuilder.AppendLine("<script>var p='$PE_BASE64'; var d=atob(p); var b=new Blob([d]); URL.createObjectURL(b);</script>")
+for ($i = 1; $i -le 70; $i++) {
+  [void]$prescanBudgetBuilder.AppendLine("<script>var benign$i = 'prescan-budget-filler-$i-abcdefghijklmnopqrstuvwxyz-0123456789'; console.log(benign$i);</script>")
+}
+[void]$prescanBudgetBuilder.AppendLine('</body></html>')
+$PRESCAN_BUDGET_HTML = $prescanBudgetBuilder.ToString()
+
 Assert-MinBase64Length -Name 'PE_BASE64' -Base64 $PE_BASE64 -MinimumChars $MinDecodeBase64Chars
 Assert-MinBase64Length -Name 'WASM_BASE64' -Base64 $WASM_BASE64 -MinimumChars $MinDecodeBase64Chars
 Assert-MinBase64Length -Name 'PDF_JS_BASE64' -Base64 $PDF_JS_BASE64 -MinimumChars $MinDecodeBase64Chars
@@ -434,6 +694,22 @@ Assert-MinBase64Length -Name 'HTA_BASE64' -Base64 $HTA_BASE64 -MinimumChars $Min
 Assert-MinBase64Length -Name 'certPemB64' -Base64 $certPemB64 -MinimumChars $MinDecodeBase64Chars
 Assert-MinBase64Length -Name 'certPkcs7B64' -Base64 $certPkcs7B64 -MinimumChars $MinDecodeBase64Chars
 
+Assert-MinBase64Length -Name 'NESTED_PE_BASE64' -Base64 $NESTED_PE_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'GZIP_BASE64' -Base64 $GZIP_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_EXE_BASE64' -Base64 $ZIP_EXE_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_SCRIPT_BASE64' -Base64 $ZIP_SCRIPT_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_DOUBLE_BASE64' -Base64 $ZIP_DOUBLE_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_TRAVERSAL_BASE64' -Base64 $ZIP_TRAVERSAL_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_NESTED_BASE64' -Base64 $ZIP_NESTED_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_ENCRYPTED_BASE64' -Base64 $ZIP_ENCRYPTED_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_STORED_PE_BASE64' -Base64 $ZIP_STORED_PE_BASE64 -MinimumChars $MinDecodeBase64Chars
+Assert-MinBase64Length -Name 'ZIP_MANY_BASE64' -Base64 $ZIP_MANY_BASE64 -MinimumChars $MinDecodeBase64Chars
+
+Write-Host "v4.6 ZIP EXE Payload: $($ZIP_EXE_BASE64.Length) Zeichen" -ForegroundColor DarkGray
+Write-Host "v4.6 ZIP Stored PE:  $($ZIP_STORED_PE_BASE64.Length) Zeichen" -ForegroundColor DarkGray
+Write-Host "v4.6 ZIP Many:       $($ZIP_MANY_BASE64.Length) Zeichen" -ForegroundColor DarkGray
+Write-Host "v4.6 XOR Array Bytes: $($XOR_PE_BYTES.Length)" -ForegroundColor DarkGray
+Write-Host "v4.6 RC4 Array Bytes: $($RC4_PE_BYTES.Length)" -ForegroundColor DarkGray
 Write-Host "PE Payload: $($PE_BASE64.Length) Zeichen" -ForegroundColor Gray
 Write-Host "WASM Payload: $($WASM_BASE64.Length) Zeichen" -ForegroundColor Gray
 Write-Host "PDF JS Payload: $($PDF_JS_BASE64.Length) Zeichen" -ForegroundColor Gray
@@ -450,7 +726,7 @@ Write-Host ""
 $testFiles = @()
 
 # 01
-Add-TestFile -List ([ref]$testFiles) -Name 'test01_basic_pe_smuggling.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'atob,blob,createObjectURL,dec_pe' -Description 'Basis: atob plus Blob plus createObjectURL plus PE' -Category 'JS_SMUGGLING' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test01_basic_pe_smuggling.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'atob,blob,createObjectURL,dec_pe' -Description 'Basis: atob plus Blob plus createObjectURL plus PE' -Category 'JS_SMUGGLING' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -464,7 +740,7 @@ window.__smuggle_url = url;
 "@
 
 # 02
-Add-TestFile -List ([ref]$testFiles) -Name 'test02_split_payload_pe_fixed.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'split_payload,atob,blob,createObjectURL,dec_pe' -Description 'Korrigierter Split Payload mit mindestens sechs Fragmenten' -Category 'JS_SMUGGLING' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test02_split_payload_pe_fixed.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'split_payload,atob,blob,createObjectURL,dec_pe' -Description 'Korrigierter Split Payload mit mindestens sechs Fragmenten' -Category 'JS_SMUGGLING' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -490,7 +766,7 @@ window.__split_url = url;
 "@
 
 # 03
-Add-TestFile -List ([ref]$testFiles) -Name 'test03_array_join_pe.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'atob,blob,createObjectURL,b64_joined_parts,dec_pe' -Description 'Array.join Konstruktion mit PE Payload' -Category 'JS_SMUGGLING' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test03_array_join_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'atob,blob,createObjectURL,b64_joined_parts,dec_pe' -Description 'Array.join Konstruktion mit PE Payload' -Category 'JS_SMUGGLING' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -509,7 +785,7 @@ window.__joined_url = url;
 "@
 
 # 04
-Add-TestFile -List ([ref]$testFiles) -Name 'test04_obfuscated_pe.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'atob_obfuscated or obfus_api,blob,createObjectURL,dec_pe' -Description 'Obfuskierter Zugriff ueber Array Indizes und Konstruktoren' -Category 'OBFUSCATION' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test04_obfuscated_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'atob_obfuscated or obfus_api,blob,createObjectURL,dec_pe' -Description 'Obfuskierter Zugriff ueber Array Indizes und Konstruktoren' -Category 'OBFUSCATION' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -540,7 +816,7 @@ fetch(url).then(function(r) { return r.arrayBuffer(); }).then(function(bytes) {
 "@
 
 # 06
-Add-TestFile -List ([ref]$testFiles) -Name 'test06_uint8array_pe_large.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'uint8array_payload,pe_uint8array' -Description 'Korrigierter Uint8Array Test mit mehr als 1024 Bytewerten' -Category 'UINT8ARRAY' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test06_uint8array_pe_large.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'uint8array_payload,pe_uint8array' -Description 'Korrigierter Uint8Array Test mit mehr als 1024 Bytewerten' -Category 'UINT8ARRAY' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -553,7 +829,7 @@ window.__uint8_url = url;
 "@
 
 # 07
-Add-TestFile -List ([ref]$testFiles) -Name 'test07_delayed_execution_pe.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'delayed_execution,timeout_b64_smuggling or timeout_b64_decode,dec_pe' -Description 'Verzoegertes Smuggling ueber setTimeout' -Category 'JS_SMUGGLING' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test07_delayed_execution_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'delayed_execution,timeout_b64_smuggling or timeout_b64_decode,dec_pe' -Description 'Verzoegertes Smuggling ueber setTimeout' -Category 'JS_SMUGGLING' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -569,7 +845,7 @@ setTimeout(function() {
 "@
 
 # 08
-Add-TestFile -List ([ref]$testFiles) -Name 'test08_webworker_pe.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'webworker,atob,blob,createObjectURL,dec_pe' -Description 'Web Worker verarbeitet den Base64 Payload' -Category 'WEBWORKER' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test08_webworker_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'webworker,atob,blob,createObjectURL,dec_pe' -Description 'Web Worker verarbeitet den Base64 Payload' -Category 'WEBWORKER' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -646,7 +922,7 @@ window.__pdf_launch = url;
 "@
 
 # 13
-Add-TestFile -List ([ref]$testFiles) -Name 'test13_svg_active_content.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'att_svg_script,att_svg_event_handler,att_svg_foreignobject,att_svg_data_uri,att_svg_smuggling_context' -Description 'Aktives SVG in eingebetteter object data URI Form' -Category 'SVG_ACTIVE' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test13_svg_active_content.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'att_svg_script,att_svg_event_handler,att_svg_foreignobject,att_svg_data_uri,att_svg_smuggling_context' -Description 'Aktives SVG in eingebetteter object data URI Form' -Category 'SVG_ACTIVE' -Content @"
 <!DOCTYPE html>
 <html><body>
 <object data="data:image/svg+xml;base64,$SVG_BASE64" type="image/svg+xml"></object>
@@ -668,7 +944,7 @@ window.__chm_url = url;
 "@
 
 # 15
-Add-TestFile -List ([ref]$testFiles) -Name 'test15_hta_payload.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'att_hta_attachment or dec_script' -Description 'HTA Payload ueber Base64 und Blob' -Category 'ATTACHMENT_VECTOR_DECODE' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test15_hta_payload.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'att_hta_attachment or dec_script' -Description 'HTA Payload ueber Base64 und Blob' -Category 'ATTACHMENT_VECTOR_DECODE' -Content @"
 <!DOCTYPE html>
 <html><body>
 <script>
@@ -990,7 +1266,7 @@ Add-TestFile -List ([ref]$testFiles) -Name 'test38_html_keyword_newsletter_like.
 "@
 
 # 39
-Add-TestFile -List ([ref]$testFiles) -Name 'test39_all_in_one_capped.html' -ExpectedScore '10-15 internal capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'mehrere Klassen, intern gedeckelt' -Description 'Kombinierter Test fuer mehrere Module mit realistischer Cap Erwartung' -Category 'ALL_IN_ONE' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test39_all_in_one_capped.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'mehrere Klassen, intern gedeckelt' -Description 'Kombinierter Test fuer mehrere Module mit realistischer Cap Erwartung' -Category 'ALL_IN_ONE' -Content @"
 <!DOCTYPE html>
 <html><head>
 <style>
@@ -1034,10 +1310,158 @@ Notification.requestPermission().then(function() {
 "@
 
 # 40
-Add-TestFile -List ([ref]$testFiles) -Name 'test40_svg_data_uri_pe_direct.html' -ExpectedScore '8-10 group capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'att_svg_data_uri,att_svg_script,att_svg_event_handler,dec_pe' -Description 'Direkter SVG Data URI Test fuer den eingebetteten SVG Extraktionspfad' -Category 'SVG_ACTIVE' -Content @"
+Add-TestFile -List ([ref]$testFiles) -Name 'test40_svg_data_uri_pe_direct.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'att_svg_data_uri,att_svg_script,att_svg_event_handler,dec_pe' -Description 'Direkter SVG Data URI Test fuer den eingebetteten SVG Extraktionspfad' -Category 'SVG_ACTIVE' -Content @"
 <!DOCTYPE html>
 <html><body>
 <embed src="data:image/svg+xml;base64,$SVG_BASE64" type="image/svg+xml" />
+</body></html>
+"@
+
+# 41
+Add-TestFile -List ([ref]$testFiles) -Name 'test41_v46_script_prescan_magic_late.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'script_prescan_payload,b64_magic_prefix,dec_pe' -Description 'v4.6: billiger Vorscan erkennt einen Magic-Prefix Payload auch in einem spaeten Script Block' -Category 'V46_SCRIPT_PRESCAN' -Content $PRESCAN_LATE_HTML
+
+# 42
+Add-TestFile -List ([ref]$testFiles) -Name 'test42_v46_script_prescan_budget.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'script_prescan_payload,dec_pe' -ExpectedInfoReasons 'script_prescan_budget' -Description 'v4.6: mehr als 64 Inline Scripts provozieren kontrolliert das Prescan Budget, waehrend ein frueher PE Payload erkannt bleibt' -Category 'V46_BUDGET' -Content $PRESCAN_BUDGET_HTML
+
+# 43
+Add-TestFile -List ([ref]$testFiles) -Name 'test43_v46_uint8array_hex_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'uint8array_payload,pe_uint8array' -Description 'Hexadezimale Uint8Array Bytefolge mit PE Magic 0x4D,0x5A' -Category 'V46_UINT8ARRAY' -Content @"
+<!DOCTYPE html>
+<html><body>
+<script>
+var peHex = new Uint8Array([$PE_HEX_ARRAY]);
+var blob = new Blob([peHex], {type:'application/octet-stream'});
+var url = URL.createObjectURL(blob);
+window.__hex_pe = url;
+</script>
+</body></html>
+"@
+
+# 44
+Add-TestFile -List ([ref]$testFiles) -Name 'test44_v46_nested_base64_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'nested_base64_payload,dec_pe' -Description 'Rekursiver Base64 Decode: aeussere Base64 Stufe enthaelt eine weitere PE Base64 Stufe' -Category 'V46_RECURSIVE_DECODE' -Content @"
+<!DOCTYPE html>
+<html><body>
+<script>
+var outer = "$NESTED_PE_BASE64";
+var stage1 = atob(outer);
+var blob = new Blob([stage1], {type:'text/plain'});
+var url = URL.createObjectURL(blob);
+window.__nested = url;
+</script>
+</body></html>
+"@
+
+# 45
+Add-TestFile -List ([ref]$testFiles) -Name 'test45_v46_gzip_magic_payload.html' -ExpectedScore '6-10' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_compressed' -Description 'Dekodierte Payload mit GZIP Magic Header fuer die erweiterte Content Klassifikation' -Category 'V46_COMPRESSED' -Content @"
+<!DOCTYPE html>
+<html><body>
+<script>
+var payload = "$GZIP_BASE64";
+var decoded = atob(payload);
+var blob = new Blob([decoded], {type:'application/octet-stream'});
+URL.createObjectURL(blob);
+</script>
+</body></html>
+"@
+
+# 46
+Add-TestFile -List ([ref]$testFiles) -Name 'test46_v46_zip_executable_member.html' -ExpectedScore '8-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip,zip_executable_member' -Description 'Echtes ZIP Layout mit ausfuehrbarem Mitglied payload.exe' -Category 'V46_ZIP' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_EXE_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 47
+Add-TestFile -List ([ref]$testFiles) -Name 'test47_v46_zip_script_member.html' -ExpectedScore '8-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip,zip_script_member' -Description 'ZIP Central Directory enthaelt eine PowerShell Datei' -Category 'V46_ZIP' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_SCRIPT_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 48
+Add-TestFile -List ([ref]$testFiles) -Name 'test48_v46_zip_double_extension.html' -ExpectedScore '8-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip,zip_executable_member,zip_double_extension' -Description 'ZIP Mitglied invoice.pdf.exe prueft Cover Extension plus gefaehrliche finale Extension' -Category 'V46_ZIP' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_DOUBLE_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 49
+Add-TestFile -List ([ref]$testFiles) -Name 'test49_v46_zip_path_traversal.html' -ExpectedScore '8-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip,zip_script_member,zip_path_traversal' -Description 'ZIP Mitglied mit ../ Pfad prueft Path Traversal Klassifikation' -Category 'V46_ZIP' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_TRAVERSAL_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 50
+Add-TestFile -List ([ref]$testFiles) -Name 'test50_v46_zip_nested_archive.html' -ExpectedScore '6-12' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip,zip_nested_archive' -Description 'ZIP Mitglied inner.zip prueft Nested Archive Metadaten' -Category 'V46_ZIP' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_NESTED_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 51
+Add-TestFile -List ([ref]$testFiles) -Name 'test51_v46_zip_high_ratio.html' -ExpectedScore '4-10' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip' -ExpectedInfoReasons 'zip_high_compression_ratio' -Description 'ZIP Metadaten melden ueber 1 MiB unkomprimiert bei sehr kleiner komprimierter Groesse' -Category 'V46_ZIP_INFO' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_HIGH_RATIO_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 52
+Add-TestFile -List ([ref]$testFiles) -Name 'test52_v46_zip_stored_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip,zip_stored_payload,dec_pe' -Description 'Stored ZIP Mitglied enthaelt direkt einen PE Payload und wird begrenzt rekursiv analysiert' -Category 'V46_ZIP_STORED' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_STORED_PE_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 53
+Add-TestFile -List ([ref]$testFiles) -Name 'test53_v46_zip_encrypted_flag.html' -ExpectedScore '6-12' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip,zip_encrypted' -Description 'ZIP Central Directory mit General Purpose Encryption Flag' -Category 'V46_ZIP' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_ENCRYPTED_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 54
+Add-TestFile -List ([ref]$testFiles) -Name 'test54_v46_zip_many_entries.html' -ExpectedScore '4-10' -ExpectedDetection 'YES' -ExpectedCoreReasons 'dec_zip' -ExpectedInfoReasons 'zip_many_entries' -Description 'ZIP mit 257 Eintraegen prueft das max_entries Limit und den Info Marker' -Category 'V46_ZIP_INFO' -Content @"
+<!DOCTYPE html><html><body><script>
+var z="$ZIP_MANY_BASE64"; var d=atob(z); var b=new Blob([d],{type:'application/zip'}); URL.createObjectURL(b);
+</script></body></html>
+"@
+
+# 55
+Add-TestFile -List ([ref]$testFiles) -Name 'test55_v46_xor_constant_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'xor_constant_payload,dec_pe' -Description 'Konstantes XOR Bytearray wird mit festem Key rekonstruiert und als PE klassifiziert' -Category 'V46_CRYPTO' -Content @"
+<!DOCTYPE html>
+<html><body>
+<script>
+var enc = [$XOR_PE_ARRAY];
+var key = 0x23;
+var out = [];
+for (var i=0; i<enc.length; i++) { out.push(enc[i] ^ key); }
+var u = new Uint8Array(out);
+var b = new Blob([u], {type:'application/octet-stream'});
+URL.createObjectURL(b);
+</script>
+</body></html>
+"@
+
+# 56
+Add-TestFile -List ([ref]$testFiles) -Name 'test56_v46_rc4_constant_pe.html' -ExpectedScore '10-15 capped' -ExpectedDetection 'YES' -ExpectedCoreReasons 'rc4_constant_payload,dec_pe' -Description 'Konstantes RC4 Bytearray mit festem String Key wird rekonstruiert und als PE klassifiziert' -Category 'V46_CRYPTO' -Content @"
+<!DOCTYPE html>
+<html><body>
+<script>
+var encrypted = [$RC4_PE_ARRAY];
+var key = "$RC4_KEY";
+function rc4(data, key) {
+  var s = [], j = 0, x, out = [];
+  for (var i=0; i<256; i++) s[i]=i;
+  for (var i=0; i<256; i++) { j=(j+s[i]+key.charCodeAt(i%key.length))%256; x=s[i]; s[i]=s[j]; s[j]=x; }
+  i=0; j=0;
+  for (var y=0; y<data.length; y++) { i=(i+1)%256; j=(j+s[i])%256; x=s[i]; s[i]=s[j]; s[j]=x; out.push(data[y] ^ s[(s[i]+s[j])%256]); }
+  return out;
+}
+var plain = rc4(encrypted, key);
+var u = new Uint8Array(plain);
+var b = new Blob([u], {type:'application/octet-stream'});
+URL.createObjectURL(b);
+</script>
 </body></html>
 "@
 
@@ -1065,6 +1489,7 @@ try {
       Write-Host "OK  $($file.Name)" -ForegroundColor Green
       Write-Host "   Score: $($file.ExpectedScore) | Detection: $($file.ExpectedDetection)" -ForegroundColor Gray
       Write-Host "   Core:  $($file.ExpectedCoreReasons)" -ForegroundColor DarkGray
+      Write-Host "   Info:  $($file.ExpectedInfoReasons)" -ForegroundColor DarkGray
       Write-Host "   $($file.Description)" -ForegroundColor DarkGray
       Write-Host ""
 
@@ -1074,6 +1499,7 @@ try {
         ExpectedScore = $file.ExpectedScore
         ExpectedDetection = $file.ExpectedDetection
         ExpectedCoreReasons = $file.ExpectedCoreReasons
+        ExpectedInfoReasons = $file.ExpectedInfoReasons
         Description = $file.Description
       }
 
@@ -1093,29 +1519,60 @@ try {
   ($summary | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
   $readme = @"
-HTML Pattern Test Suite v4.4.2-r1
+HTML Pattern Test Suite v4.6.0-r1
 
-Diese Suite deckt absichtlich nur HTML und Script Muster ab.
+Diese Suite deckt absichtlich primaer HTML und Script Muster ab und wurde fuer
+HTML Smuggling Detection v4.6.0 erweitert.
+
+Neu in v4.6.0 innerhalb dieser HTML Suite:
+- Script Prescan inklusive script_prescan_payload
+- Script Prescan Budget mit mehr als 64 Inline Scripts
+- hexadezimale Uint8Array PE Rekonstruktion
+- rekursives Base64 Decoding
+- GZIP Magic Klassifikation
+- echtes ZIP Local Header / Central Directory Testmaterial
+- ZIP Executable und Script Members
+- ZIP Double Extension und Path Traversal
+- ZIP Nested Archive und Encryption Flag
+- ZIP High Compression Ratio und Many Entries Info Pfade
+- Stored ZIP Payload mit rekursiver PE Analyse
+- konstante XOR Payload Rekonstruktion
+- konstante RC4 Payload Rekonstruktion
 
 Bewusst NICHT vollstaendig abgedeckt:
-- echte MIME Attachment Dateinamen
-- echte MIME Part Typen
-- echte Newsletter Header
-- trusted sender und maps
-- image_smuggling_info als Part Dateiname
-- OneNote, DOCM, XLSM, JS Attachments als echte Mailparts
+- echte MIME Attachment Dateinamen und MIME Part Typen
+- Attachment Magic Mismatch zwischen Dateiname und MIME Inhalt
+- Image Tail Carving an echten PNG, JPEG, GIF und WebP Mailparts
+- echte Newsletter Header und trusted sender Maps
+- globale Byte und Container Budgets ueber viele MIME Parts
+- globale Runtime Budgets als deterministischer Test
+- OneNote, DOCM, XLSM, LNK und Script Dateien als echte Mailparts
 
-Dafuer braucht es eine separate EML Suite.
+Dafuer braucht es weiterhin eine separate EML Suite.
 
-Besonders wichtig:
-- test13 und test40 sind nur sinnvoll, wenn die Erkennung fuer eingebettete SVG Data URIs vorhanden ist
-- Score Erwartungen orientieren sich an v4.4.2-r1 Caps und nicht an alten 4.3.x Zahlen
+Wichtige v4.6 Standardwerte:
+- script.max_check = 5
+- script.prescan_chunk = 4096
+- budget.max_runtime_ms = 250
+- budget.max_total_bytes = 4 MiB
+- budget.max_decode_ops = 24
+- budget.max_container_ops = 8
+- budget.max_scripts_prescanned = 64
+- budget.max_script_prescan_bytes = 512 KiB
+- zip.max_entries = 256
+- zip.high_ratio = 100
+- crypto.max_input_bytes = 64 KiB
+- crypto.max_key_bytes = 64
+- crypto.max_candidates = 4
+
+Score Erwartungen sind bewusst als Bereiche angegeben. Entscheidend fuer Regressionstests
+sind ExpectedDetection, ExpectedCoreReasons und ExpectedInfoReasons.
 "@
   Write-Utf8NoBomFile -Path $readmePath -Content $readme
 
   Write-Host ""
   Write-Host "╔══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-  Write-Host "║                      HTML PATTERN SUITE ABGESCHLOSSEN                               ║" -ForegroundColor Cyan
+  Write-Host "║                      HTML PATTERN SUITE v4.6 ABGESCHLOSSEN                               ║" -ForegroundColor Cyan
   Write-Host "╠══════════════════════════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
   Write-Host "║  Ordner: $outputRoot" -ForegroundColor White
   Write-Host "║  Erfolgreich: $successCount von $($testFiles.Count)" -ForegroundColor Green
@@ -1127,8 +1584,8 @@ Besonders wichtig:
   Write-Host "║  Payload Byte Ziel: >= $TargetPayloadBytes Bytes" -ForegroundColor Yellow
   Write-Host "║" -ForegroundColor Cyan
   Write-Host "║  Coverage:" -ForegroundColor Magenta
-  Write-Host "║    JS_SMUGGLING, OBFUSCATION, WASM, PDF, SVG, CERT, CSS, GEO, EVASION" -ForegroundColor Gray
-  Write-Host "║    PERSISTENCE, DOMAIN_ROTATION, CLICKFIX, PUSH_ABUSE, BLOCKCHAIN, NEGATIVE" -ForegroundColor Gray
+  Write-Host "║    JS_SMUGGLING, OBFUSCATION, PRESCAN, WASM, PDF, SVG, CERT, CSS, GEO, EVASION" -ForegroundColor Gray
+  Write-Host "║    PERSISTENCE, CLICKFIX, WEB3, ZIP-PARSER, XOR, RC4, COMPRESSED, NEGATIVE" -ForegroundColor Gray
   Write-Host "║" -ForegroundColor Cyan
   Write-Host "║  CSV Manifest:  $csvPath" -ForegroundColor Gray
   Write-Host "║  JSON Manifest: $jsonPath" -ForegroundColor Gray
