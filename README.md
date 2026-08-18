@@ -1,190 +1,494 @@
-# HTML Smuggling Detection v4.4.0
+# HTML Smuggling Detection v4.5.0
 
-![Version](https://img.shields.io/badge/Version-4.4.0-green)
+![Version](https://img.shields.io/badge/Version-4.5.0-green)
 ![Rspamd](https://img.shields.io/badge/Rspamd-Lua%20Local-blue)
-![Security](https://img.shields.io/badge/Focus-Hardened%20Gate%20%26%20Entropy-red)
+![Security](https://img.shields.io/badge/Focus-HTML%20Smuggling%20%26%20Payload%20Detection-red)
+
+Rspamd-Lua-Modul zur Erkennung von **HTML Smuggling**, verschleierten JavaScript-Payloads, Base64-/Byte-Array-Staging sowie ergänzenden **Non-HTML- und Attachment-Vektoren**.
+
+Version **4.5.0** erweitert die Payload-Rekonstruktion und Inhaltsklassifizierung deutlich, ohne den Ansatz eines performanten Mail-Gateway-Scanners zu verlassen.
+
+---
 
 ## Zweck
 
-Dieses Modul erweitert Rspamd um eine praxisnahe Erkennung von HTML Smuggling, verschleierten JavaScript Payloads und ergänzenden Non HTML Vektoren. Die Version v4.4.0 baut auf den früheren 4.3.x Linien auf und führt die Architektur mit Modulmatrix, Reason Policy, Limits, Thresholds, Marker Symbolen und erweiterten Attachment Pfaden konsistent weiter.
+Das Modul ergänzt Rspamd um eine mehrstufige Erkennung moderner Smuggling-, Staging- und Delivery-Techniken.
 
-Das Ziel ist nicht eine forensische Vollanalyse jeder Datei, sondern eine robuste und performante Erkennung typischer Smuggling, Staging und Delivery Muster im produktiven Mail Gateway Betrieb.
-
-## Architekturüberblick
-
-Die Erkennung ist in mehrere Schichten aufgeteilt:
-
-1. **Frühe HTML und Part Erkennung**
-   HTML Teile und smuggling relevante Attachments werden identifiziert.
-
-2. **HTML Signalerkennung**
-   Typische JavaScript, CSS, AppInstaller, ClickFix und andere frühe Indikatoren werden gesammelt.
-
-3. **Script Deep Scan**
-   Interessante Script Blöcke werden priorisiert, deobfuskiert und auf weitere Module untersucht.
-
-4. **Decode Pfad**
-   Base64 Kandidaten werden extrahiert, normalisiert, dekodiert und klassifiziert.
-
-5. **Payload Klassifikation**
-   Dekodierte Inhalte werden als PE, ZIP, ISO, Script, PDF, HTML, XML, WASM und weitere Typen eingeordnet.
-
-6. **Scoring und Marker**
-   Kategorien, Bonus Module, Caps und Marker Symbole werden konsistent berechnet und geschrieben.
-
-## Abgedeckte Bereiche
-
-Die Version v4.4.0 deckt insbesondere folgende Bereiche ab:
+Der Schwerpunkt liegt auf:
 
 - HTML Smuggling mit JavaScript
-- Base64 Decode Pfade
-- Obfuskation und API Tarnung
-- Uint8Array Payload Konstruktion
-- externe Script Nachladungen
-- CSS Exfiltration und CSS Code Execution Muster
-- Geo Targeting und Evasion
-- Persistence mit localStorage und sessionStorage
-- ClickFix ähnliche Lures
-- WASM Staging
-- Blockchain oder Web3 Staging
-- PDF Active Content
-- SVG mit aktivem Inhalt
-- CHM, HTA, OneNote, LNK und Script Attachments
-- Zertifikats und PKCS basierte Smuggling Kontexte
-- optionale Bild Indikatoren als Info Only
-- Push Abuse als Info Signale
-- vorbereitete, aber standardmässig deaktivierte Pfade für RC4 Detection und WASM Binary Analysis
+- Base64- und Split-Payload-Rekonstruktion
+- JavaScript-Obfuskation
+- `Uint8Array`-Payloads
+- Magic-Prefix- und Dateityp-Erkennung
+- rekursivem Decode von Zwischenstufen
+- gefährlichen oder aktiven Attachments
+- Attachment-Magic-/Dateiendungs-Mismatches
+- Image-Tail-Carving
+- PDF-/SVG-Active-Content
+- AppInstaller-, WASM-, ClickFix- und Web3-Staging
+- Zertifikats-/PKCS-Smuggling-Kontexten
+- Evasion-, Persistence- und Geo-Targeting-Signalen
 
-## Nicht oder nur eingeschränkt abgedeckt
+Das Ziel ist **keine vollständige forensische Dateianalyse**, sondern eine robuste, nachvollziehbare und laufzeitbegrenzte Erkennung direkt im produktiven Mail-Gateway.
 
-Die Version v4.4.0 ist stark für Mail Gateway Erkennung optimiert. Folgende Bereiche sind nicht als vollständige Tiefenanalyse umgesetzt:
+---
 
-- echte Steganographie Analyse in Bildern
-- vollständige PDF Objekt Rekonstruktion
-- tiefes Office Parsing mit Makro Extraktion
-- vollständige Zertifikats oder PKCS Validierung
-- Headless Nachverfolgung externer URLs
-- Browser Laufzeitverhalten nach Mail Zustellung
-- Sandbox Verhalten oder System Calls eines Payloads
+## Was ist neu in v4.5.0?
 
-Das ist bewusst so gehalten, damit das Modul produktiv auf Rspamd lauffähig und wartbar bleibt.
+Die wichtigsten Erweiterungen gegenüber v4.4.0:
 
-## Hauptmodule
+- **Base64 Magic-Prefix Fast-Path** für kleine PE-, ZIP-, PDF-, WASM-, CAB-, RAR-, 7ZIP-, OLE-, LNK- und CHM-Payloads
+- Base64-Kandidaten werden zuerst **gesammelt, bewertet und priorisiert**
+- `Uint8Array` verarbeitet **dezimale und hexadezimale Bytewerte**
+- Unterstützung von `Uint8Array` über zuvor definierte Array-Variablen
+- zusätzliche Deobfuskations-Pfade für:
+  - Escape-Sequenzen
+  - `fromCharCode`
+  - Percent-Encoding
+  - Hex-Arrays
+  - Blob-/String-Konkatenationen
+- **rekursive Base64-Erkennung** für druckbare Zwischenstufen
+- Standard-Decode-Tiefe: **3**
+- zusätzliche Magic-Erkennung für:
+  - GZIP
+  - BZIP2
+  - XZ
+  - ZSTD
+  - TAR
+- **Attachment-Inhaltsprüfung** mit Magic-/Dateiendungs-Abgleich
+- **Image-Tail-Carving** für PNG, JPEG, GIF und WebP
+- priorisierte Script-Auswahl anhand des Payload-Interesses
+- standardmässig bis zu **5 relevante Scripts**
+- Magic-Prefix-Payloads erhalten bei der Script-Auswahl höchste Priorität
+- ZIP-Inhalte werden auf ausführbare oder scriptbasierte Dateinamen geprüft
 
-### appinstaller
-Erkennt `ms-appinstaller` Kontexte und `.appinstaller` Hinweise. Dazu gehören URI Hinweise, Dateiendungen und dekodierte XML AppInstaller Inhalte.
+---
 
-### js_smuggling
-Erkennt die typischen JavaScript Bausteine wie `atob`, `Blob`, `fetch`, `createObjectURL`, Split Payloads, Timer Verzögerung, DOM Clobbering, Data URI Hinweise und Decode Kontexte.
+## Architektur
 
-### obfuscation
-Erkennt Tarnungsmuster wie `fromCharCode`, `_0x...` Variablen, hohe Entropie, Hex Arrays, Function Konstruktoren, Eval Brücken und ähnliche Konstrukte.
+Die Erkennung arbeitet in mehreren Stufen.
 
-### decoded_payload
-Versucht dekodierte Base64 Inhalte zu klassifizieren, zum Beispiel PE, ZIP, ISO, CAB, RAR, 7ZIP, OLE, Script, HTML, XML, PDF oder WASM.
+### 1. Message- und MIME-Part-Erkennung
 
-### uint8array
-Erkennt grosse `Uint8Array` Konstruktionen und prüft Header Hinweise auf PE, WASM, ZIP oder PDF.
+Rspamd-Parts werden geprüft und nach HTML-, Script-, Zertifikats-, Container- und Attachment-Kontexten klassifiziert.
 
-### external_scripts
-Erkennt externe Scripts im HTML und bewertet diese nur im passenden Smuggling Kontext.
+### 2. Frühe HTML-Signalerkennung
 
-### css_exfil
-Erkennt missbräuchliche CSS Konstrukte wie `@import`, `attr()` und grosse Base64 Blöcke in Style Bereichen.
+Der HTML-Pfad sucht unter anderem nach:
 
-### geo_targeting
-Erkennt Geo APIs, Country Checks und Timezone basierte Selektionslogik.
+- `atob`
+- `Blob`
+- `createObjectURL`
+- `fetch`
+- `FileReader`
+- `Uint8Array`
+- `data:` URIs
+- dynamischen Script-Elementen
+- Redirect-Logik
+- WebAssembly
+- ServiceWorker
+- WebCrypto
+- CSS-Missbrauch
+- ClickFix-/Fake-CAPTCHA-Mustern
 
-### evasion
-Erkennt Antisandbox und User Interaction Muster wie `navigator.webdriver`, Hardware Checks und erzwungene Maus oder Keyboard Interaktion.
+### 3. Script-Sammlung und Priorisierung
 
-### persistence
-Erkennt `localStorage` und `sessionStorage` Nutzung im verdächtigen Kontext.
+Script-Blöcke werden nur einmal aus dem HTML extrahiert.
 
-### domain_rotation
-Erkennt Redirect oder Domain Rotation Logik.
+Danach werden interessante Inline-Scripts bewertet und priorisiert. Scripts mit bekannten Base64-Magic-Prefixen erhalten eine besonders hohe Priorität.
 
-### clickfix
-Erkennt typische ClickFix, Fake CAPTCHA und Run Dialog Lures.
+Standardmässig werden bis zu **5 Scripts** tief geprüft. Besonders interessante Magic-Payloads können zusätzlich berücksichtigt werden.
 
-### wasm_staging
-Erkennt WebAssembly als Stage oder Payload Brücke.
+### 4. Deobfuskation
 
-### blockchain_staging
-Erkennt Web3 oder Ethers basierte Payload oder Remote Stage Muster.
+Verdächtige Script-Inhalte werden kontrolliert rekonstruiert.
 
-### css_code_execution
-Erkennt Konstrukte, bei denen CSS Inhalte später durch JavaScript ausgelesen und missbraucht werden.
+Unterstützt werden unter anderem:
 
-### attachment_vectors
-Erkennt Non HTML und Attachment Vektoren wie:
+- String-Konkatenation
+- Array-Join-Konstrukte
+- Hex-Arrays
+- `fromCharCode`
+- Escape-Sequenzen
+- Percent-Encoding
+- Blob-Konkatenationen
+- `_0x...`-artige Variablen
+- Function-/Eval-Konstrukte
 
-- PDF mit `/JavaScript`, `/OpenAction`, `/Launch`, `/EmbeddedFile`, `/RichMedia`
-- SVG mit `<script>`, `onload`, `foreignObject`, `xlink:href`, `data:` Kontext
+### 5. Decode-Pfad
+
+Base64-Kandidaten werden:
+
+1. extrahiert,
+2. normalisiert,
+3. bewertet,
+4. priorisiert,
+5. dekodiert,
+6. per Magic/Inhalt klassifiziert.
+
+Druckbare Zwischenstufen können erneut auf Base64 untersucht werden. Die Standardtiefe liegt bei **3 Decode-Ebenen**.
+
+### 6. Payload-Klassifikation
+
+Dekodierte Inhalte können unter anderem erkannt werden als:
+
+- PE
+- WASM
+- ZIP
+- RAR
+- 7ZIP
+- CAB
+- OLE
+- VHDX
+- LNK
+- CHM
+- PDF
+- HTML
+- XML
+- Script
+- GZIP
+- BZIP2
+- XZ
+- ZSTD
+- TAR
+
+### 7. Attachment-Inhaltsprüfung
+
+Bei Attachments wird nicht nur der Dateiname betrachtet.
+
+Das Modul vergleicht:
+
+- Dateiendung
+- MIME-Type
+- tatsächlichen Dateiinhalt / Magic
+
+Ein Widerspruch kann als `attachment_magic_mismatch` gewertet werden.
+
+### 8. Image-Tail-Carving
+
+Für PNG, JPEG, GIF und WebP kann Inhalt **hinter dem regulären Bildende** untersucht werden.
+
+Wird dort ein weiterer erkennbarer Payload gefunden, entsteht der Grund:
+
+`image_appended_payload`
+
+### 9. Scoring und Marker
+
+Alle Reasons werden einer festen Policy-Klasse zugeordnet. Daraus werden Score, Caps, Marker und Ergebnistext berechnet.
+
+---
+
+## Erkennungsbereiche
+
+### HTML und JavaScript
+
+- HTML Smuggling
+- Base64-Staging
+- Split Payloads
+- `Array.join()`-Rekonstruktion
+- `Blob`
+- `createObjectURL`
+- `fetch`
+- `FileReader`
+- `Uint8Array`
+- Data-URIs
+- dynamische Scripts
+- Timer-/Delayed-Execution
+- DOM-Clobbering
+- Computed Redirects
+
+### Obfuskation
+
+- hohe Entropie
+- Hex-Variablen
+- Hex-Arrays
+- String-Arrays
+- `fromCharCode`
+- `eval`
+- `Function`
+- Escape-Payloads
+- Percent-Encoding
+- Blob-Konkatenation
+- Array-Join-Obfuskation
+
+### Evasion
+
+- `navigator.webdriver`
+- Hardware-/Environment-Checks
+- erzwungene User-Interaktion
+- Maus-/Keyboard-Gates
+- Geo-/Country-Selektion
+- Timezone-Selektion
+
+### Persistence
+
+- `localStorage`
+- `sessionStorage`
+
+### Staging
+
+- WASM
+- WebWorker
+- ServiceWorker
+- WebCrypto
+- Blockchain/Web3
+- Ethers
+- Domain-Rotation
+- externe Script-Nachladung
+
+### Social Engineering / ClickFix
+
+- Fake CAPTCHA
+- Clipboard-Execution
+- Run-Dialog-Lures
+- PowerShell-Lures
+
+### PDF Active Content
+
+Erkannt werden unter anderem:
+
+- `/JavaScript`
+- `/OpenAction`
+- `/Launch`
+- `/EmbeddedFile`
+- `/RichMedia`
+
+### SVG Active Content
+
+Erkannt werden unter anderem:
+
+- `<script>`
+- Event-Handler wie `onload`
+- `foreignObject`
+- `xlink:href`
+- `data:`-URIs
+
+### Weitere Attachment-Vektoren
+
 - CHM
 - HTA
 - OneNote
 - LNK
-- Script Dateien wie JS, VBS, PS1, BAT, CMD
-- Office Macro Container wie DOCM, XLSM, PPTM
-- deklarierte oder direkte WASM Attachments
+- HTML
+- JS / JSE
+- VBS / VBE
+- PowerShell
+- WSF
+- BAT / CMD
+- Office-Makrocontainer:
+  - DOCM
+  - XLSM
+  - PPTM
 
-### certificate_smuggling
-Erkennt:
+### Zertifikats- und PKCS-Kontexte
 
-- inline PEM Blöcke
-- PKCS Hinweise
-- Zertifikats Dateitypen
-- `data:` Kontexte mit Zertifikats oder PKCS Bezug
-- grosse Base64 Blöcke im Zertifikats Kontext
+- Inline-PEM
+- PKCS-Hinweise
+- Zertifikatsdateien
+- Certificate-/PKCS-Data-URIs
+- grosse Base64-Blöcke im passenden Kontext
 
-### image_smuggling_info
-Standardmässig deaktiviert und als Info Only gedacht. Erkennt nur einfache Indikatoren, keine echte Steganographie.
+---
 
-### push_abuse
-Info Only Modul für Notification Permission, Push Flow und ServiceWorker Kombinationen.
+## Module
 
-### link_analysis
-Vorbereitet, standardmässig deaktiviert, derzeit ohne aktive Headless URL Analyse.
+| Modul | Default | Info only | Zweck |
+|---|---:|---:|---|
+| `appinstaller` | an | nein | AppInstaller-URI/XML-Erkennung |
+| `js_smuggling` | an | nein | zentrale HTML-/JS-Smuggling-Erkennung |
+| `obfuscation` | an | nein | JavaScript-Obfuskation |
+| `decoded_payload` | an | nein | Decode und Payload-Klassifikation |
+| `uint8array` | an | nein | Byte-Array-Payloads |
+| `external_scripts` | an | nein | externe und dynamische Scripts |
+| `css_exfil` | an | nein | CSS-Exfiltrationsmuster |
+| `geo_targeting` | an | nein | Geo-/Timezone-Targeting |
+| `evasion` | an | nein | Anti-Sandbox-/Interaktionslogik |
+| `persistence` | an | nein | Browser-Storage-Persistence |
+| `domain_rotation` | an | nein | Redirect-/Domain-Rotation |
+| `clickfix` | an | nein | ClickFix-/Fake-CAPTCHA-Lures |
+| `wasm_staging` | an | nein | WASM-Staging |
+| `blockchain_staging` | an | nein | Web3-/Blockchain-Staging |
+| `css_code_execution` | an | nein | CSS als Code-/Payload-Brücke |
+| `attachment_vectors` | an | nein | Non-HTML- und Attachment-Vektoren |
+| `certificate_smuggling` | an | nein | PEM-/PKCS-Kontexte |
+| `image_smuggling_info` | aus | ja | einfache Bild-Missbrauchsindikatoren |
+| `push_abuse` | an | ja | Push-/Notification-Missbrauch |
+| `link_analysis` | aus | ja | vorbereiteter Link-Analyse-Pfad |
+| `wasm_binary_analysis` | aus | nein | vorbereitete tiefere WASM-Analyse |
+| `rc4_detection` | aus | nein | optionale RC4-Mustererkennung |
 
-### wasm_binary_analysis
-Vorbereitet, standardmässig deaktiviert. Dient als Platzhalter für tiefere WASM Binary Auswertung.
+`info_only = true` bedeutet, dass ein Modul Hinweise liefern kann, ohne den regulären Score zu erhöhen.
 
-### rc4_detection
-Vorbereitet, standardmässig deaktiviert. Erkennt RC4 typische KSA, PRGA, XOR und Decrypt Muster.
+---
 
-## Standardmässige Modul Defaults
+## Scoring-Modell
 
-Die Modul Defaults in v4.4.0 sind:
+Das Modul erhöht den Score **nicht blind pro Einzelindikator**.
 
-- `appinstaller = enabled`
-- `js_smuggling = enabled`
-- `obfuscation = enabled`
-- `decoded_payload = enabled`
-- `uint8array = enabled`
-- `external_scripts = enabled`
-- `css_exfil = enabled`
-- `geo_targeting = enabled`
-- `evasion = enabled`
-- `persistence = enabled`
-- `domain_rotation = enabled`
-- `clickfix = enabled`
-- `wasm_staging = enabled`
-- `blockchain_staging = enabled`
-- `css_code_execution = enabled`
-- `attachment_vectors = enabled`
-- `certificate_smuggling = enabled`
-- `image_smuggling_info = disabled, info_only = true`
-- `push_abuse = enabled, info_only = true`
-- `link_analysis = disabled, info_only = true`
-- `wasm_binary_analysis = disabled`
-- `rc4_detection = disabled`
+Reasons werden zuerst in Klassen eingeordnet:
 
-## Config Optionen komplett
+- `JS_SMUGGLING`
+- `OBFUSCATION`
+- `SUSPICIOUS_API`
+- `EVASION`
+- `CONTAINER`
+- `SCRIPT_HARD`
+- `CRITICAL`
 
-### Top Level Optionen
+Zusätzlich existieren:
 
-~~~lua
+- Soft-Boni
+- Hard-Boni
+- Combo-Scores
+- Newsletter-Multiplikatoren
+- `soft_only_cap`
+- `max_final_score`
+- optionaler `critical_boost`
+
+Damit wird verhindert, dass viele ähnliche Hinweise zu einer unkontrollierten Score-Explosion führen.
+
+### Standardgewichte
+
+```lua
+weights {
+  JS_SMUGGLING       = 1.2;
+  OBFUSCATION        = 2.5;
+  SUSPICIOUS_API     = 0.8;
+  EVASION_LOGIC      = 1.5;
+  CONTAINER          = 6.0;
+  SCRIPT_HARD        = 7.0;
+  CRITICAL           = 12.0;
+
+  COMBO_JS_OBFUS     = 1.5;
+  COMBO_HARD_OBFUS   = 2.0;
+  COMBO_JS_API       = 0.8;
+  COMBO_JS_EVASION   = 0.7;
+
+  EXTERNAL_SCRIPT    = 1.0;
+  CSS_EXFIL          = 2.0;
+  GEO_TARGETING      = 0.8;
+  ROTATION_BONUS     = 1.0;
+  CLICKFIX_LURE      = 1.2;
+  WASM_STAGING       = 1.4;
+  BLOCKCHAIN_STAGING = 1.2;
+  CSS_CODE_EXEC      = 1.5;
+  ATTACHMENT_VECTOR  = 1.4;
+  CERT_SMUGGLING     = 1.1;
+  IMAGE_SMUGGLING    = 0.7;
+}
+```
+
+---
+
+## Limits
+
+Die Limits schützen den Mail-Gateway-Betrieb vor übermässigem CPU- und Speicherverbrauch.
+
+```lua
+limits {
+  scan {
+    max_bytes               = 204800;
+    smart_chunk             = 51200;
+    long_html_b64_threshold = 1200;
+    max_attachment_text     = 307200;
+    max_attachment_magic    = 2097152;
+    image_tail_max          = 262144;
+  }
+
+  b64 {
+    min_len             = 200;
+    magic_min_len       = 40;
+    max_candidates      = 6;
+    max_pool_candidates = 32;
+    max_scan_bytes      = 512000;
+    min_decode_total    = 400;
+    big_threshold       = 5000;
+    huge_threshold      = 20000;
+    join_max_parts      = 5;
+    join_max_len        = 180000;
+  }
+
+  decode {
+    max_bytes             = 163840;
+    joined_len_mul        = 2;
+    max_depth             = 3;
+    nested_max_candidates = 3;
+  }
+
+  script {
+    max_check             = 5;
+    max_external          = 5;
+    max_vars              = 20;
+    smart_chunk           = 20000;
+    max_script_len        = 80000;
+    max_total_script_scan = 120000;
+    max_script_time_ms    = 80.0;
+    deobfus_timeout_ms    = 50.0;
+    split_payload_min_vars = 6;
+  }
+
+  obfus {
+    min_frag_len             = 4;
+    virtual_trigger_len      = 120;
+    virtual_max_payloads     = 3;
+    resolve_passes           = 8;
+    max_uint8array_bytes     = 2048;
+    max_entropy_check_bytes  = 4096;
+    css_max_style_size       = 10000;
+    max_delayed_exec_context = 500;
+  }
+}
+```
+
+### Wichtige Limits
+
+| Option | Standard | Bedeutung |
+|---|---:|---|
+| `scan.max_bytes` | 200 KiB | maximale HTML-Rohmenge |
+| `scan.smart_chunk` | 50 KiB | Chunk-Grösse für schnelle Textsuche |
+| `scan.max_attachment_text` | 300 KiB | Textmenge pro Attachment |
+| `scan.max_attachment_magic` | 2 MiB | maximale Rohmenge für Magic-Prüfung |
+| `scan.image_tail_max` | 256 KiB | maximales Image-Tail-Carving |
+| `b64.min_len` | 200 | normale Mindestlänge für Base64-Kandidaten |
+| `b64.magic_min_len` | 40 | Mindestlänge für Magic-Prefix-Fast-Path |
+| `b64.max_candidates` | 6 | tatsächlich dekodierte Hauptkandidaten |
+| `b64.max_pool_candidates` | 32 | maximale Kandidaten im Priorisierungspool |
+| `decode.max_depth` | 3 | maximale rekursive Decode-Tiefe |
+| `decode.nested_max_candidates` | 3 | Kandidaten pro rekursiver Zwischenstufe |
+| `script.max_check` | 5 | regulär tief geprüfte Scripts |
+| `script.max_script_time_ms` | 80 ms | Script-Scan-Zeitbudget |
+| `script.deobfus_timeout_ms` | 50 ms | Deobfuskationsbudget |
+
+---
+
+## Thresholds
+
+```lua
+thresholds {
+  entropy_high               = 4.5;
+  entropy_very_high          = 5.0;
+  hex_var_low                = 2;
+  hex_var_high               = 5;
+  array_storage_low          = 1;
+  array_storage_high         = 3;
+  uint8array_large_min       = 1024;
+  deobfus_reduce_len_1       = 20000;
+  deobfus_reduce_len_2       = 40000;
+  b64_extract_loop_budget_ms = 25.0;
+  script_min_len             = 20;
+  normalized_script_min_len  = 40;
+  delayed_exec_context       = 500;
+}
+```
+
+---
+
+## Top-Level-Konfiguration
+
+Beispiel:
+
+```lua
 html_smuggling {
   enabled = true;
   debug = false;
@@ -222,295 +526,68 @@ html_smuggling {
   strict_weight_validation = false;
   decode_debug = false;
 }
-~~~
+```
 
-### Bedeutung der wichtigsten Optionen
+### Wichtige Optionen
 
 | Option | Standard | Bedeutung |
 |---|---:|---|
-| `enabled` | `true` | Modul aktiv oder inaktiv |
-| `debug` | `false` | Zusätzliche Debug Logs und Debug Export |
-| `test_mode` | `false` | Schreibt `HTML_SMUGGLING_TEST` statt produktivem Hauptsymbol |
-| `log_score_threshold` | `5.0` | Ab welchem Score detailliert geloggt wird |
-| `log_simple_line` | `true` | Kompakte Zusatzzeile im Log |
-| `score_debug` | `false` | Sehr detaillierte Score Zerlegung |
-| `force_extended_log` | `true` | Erzwingt Extended Log unabhängig vom Schwellenwert |
-| `force_extended_log_min_score` | `5.0` | Mindestscore für Forced Extended Log |
-| `slow_log_ms` | `150.0` | Meldet langsame Durchläufe separat |
-| `deep_scan_newsletter_header` | `true` | Deep Scan auch bei Header Newsletter Klassifikation |
-| `min_score` | `0.0` | Erzwingt Mindestscore, falls ein positiver Score berechnet wurde |
-| `critical_boost` | `0.0` | Zusatzscore bei kritischem Payload |
-| `max_final_score` | `15.0` | Endscore Cap |
-| `soft_only_cap` | `4.5` | Cap für reine Soft Fälle ohne Hard Gründe |
-| `redact_log_fields` | `true` | Maskiert sensible Felder im Log |
-| `require_script_context_for_external` | `true` | Externe Scripts nur im passenden Kontext bewerten |
-| `require_strong_gate_for_decode` | `true` | Decode Pfad nur bei starkem Kontext zulassen |
-| `max_external_reported` | `3` | Anzahl externer Script URLs im Log |
-| `heur_mul_default` | `1.0` | Normaler Soft Faktor |
-| `heur_mul_newsletter_header` | `0.3` | Soft Reduktion bei Header Newsletter |
-| `heur_mul_newsletter_heuristic` | `0.4` | Soft Reduktion bei heuristischer Newsletter Erkennung |
-| `heur_mul_trusted_newsletter` | `0.1` | Soft Reduktion für vertrauenswürdige Newsletter Domains |
-| `hard_fail_on_bad_config` | `false` | Fehlerhafte Config stoppt Modul hart |
-| `enable_phase_debug` | `false` | Loggt Phasen Metriken |
-| `safe_task_access` | `true` | Absicherung für Task Methoden |
-| `safe_part_access` | `true` | Absicherung für Part Methoden |
-| `log_config_validation` | `true` | Schreibt Config Validierungsfehler ins Log |
-| `strict_weight_validation` | `false` | Strenge Prüfung der Gewichtswerte |
-| `decode_debug` | `false` | Sehr detaillierte Decode Debug Logs |
+| `enabled` | `true` | aktiviert das Modul |
+| `debug` | `false` | allgemeines Debug-Logging |
+| `test_mode` | `false` | schreibt Test-Symbol statt Produktivsymbol |
+| `log_score_threshold` | `5.0` | Schwelle für erweitertes Logging |
+| `slow_log_ms` | `150` | Schwelle für Slow-Scan-Logging |
+| `max_final_score` | `15.0` | maximaler Endscore |
+| `soft_only_cap` | `4.5` | Score-Cap ohne Hard-Gründe |
+| `critical_boost` | `0.0` | optionaler Zusatz bei Critical Payload |
+| `require_script_context_for_external` | `true` | externe Scripts nur im passenden Kontext bewerten |
+| `require_strong_gate_for_decode` | `true` | Decode nur bei ausreichendem Kontext |
+| `redact_log_fields` | `true` | sensible Log-Felder maskieren |
+| `hard_fail_on_bad_config` | `false` | ungültige Config hart abbrechen |
+| `decode_debug` | `false` | detailliertes Decode-Logging |
 
-## Limits
+---
 
-### Standardwerte
+## Modulkonfiguration
 
-~~~lua
-limits {
-  scan {
-    max_bytes = 204800;
-    smart_chunk = 51200;
-    long_html_b64_threshold = 1200;
-    max_attachment_text = 307200;
-  }
-  b64 {
-    min_len = 200;
-    max_candidates = 6;
-    max_scan_bytes = 512000;
-    min_decode_total = 400;
-    big_threshold = 5000;
-    huge_threshold = 20000;
-    join_max_parts = 5;
-    join_max_len = 180000;
-  }
-  decode {
-    max_bytes = 163840;
-    joined_len_mul = 2;
-  }
-  script {
-    max_check = 3;
-    max_external = 5;
-    max_vars = 20;
-    smart_chunk = 20000;
-    max_script_len = 80000;
-    max_total_script_scan = 120000;
-    max_script_time_ms = 80.0;
-    deobfus_timeout_ms = 50.0;
-    split_payload_min_vars = 6;
-  }
-  obfus {
-    min_frag_len = 4;
-    virtual_trigger_len = 120;
-    virtual_max_payloads = 3;
-    resolve_passes = 8;
-    max_uint8array_bytes = 2048;
-    max_entropy_check_bytes = 4096;
-    css_max_style_size = 10000;
-    max_delayed_exec_context = 500;
-  }
-}
-~~~
+Module können einzeln aktiviert, auf `info_only` gesetzt oder mit einem eigenen Gewicht versehen werden.
 
-### Interpretation
-
-- `scan.max_bytes` begrenzt die HTML Rohmenge pro Teil.
-- `scan.smart_chunk` steuert, wie viel Text aus Anfang, Ende und Mitte für schnelle Suchen verwendet wird.
-- `b64.min_len` verhindert Kleinfragmente als Kandidaten.
-- `b64.min_decode_total` verlangt eine Mindestgesamtmenge an Base64 Material vor dem Decode.
-- `script.max_check` begrenzt die Zahl der priorisierten Script Blöcke.
-- `script.max_total_script_scan` schützt gegen grosse Scriptmengen.
-- `script.deobfus_timeout_ms` begrenzt die Deobfuskation.
-- `obfus.max_uint8array_bytes` schützt vor übergrossen Byte Arrays.
-
-## Thresholds
-
-~~~lua
-thresholds {
-  entropy_high = 4.5;
-  entropy_very_high = 5.0;
-  hex_var_low = 2;
-  hex_var_high = 5;
-  array_storage_low = 1;
-  array_storage_high = 3;
-  uint8array_large_min = 1024;
-  deobfus_reduce_len_1 = 20000;
-  deobfus_reduce_len_2 = 40000;
-  b64_extract_loop_budget_ms = 25.0;
-  script_min_len = 20;
-  normalized_script_min_len = 40;
-  delayed_exec_context = 500;
-}
-~~~
-
-## Weights
-
-~~~lua
-weights {
-  JS_SMUGGLING = 1.2;
-  OBFUSCATION = 2.5;
-  SUSPICIOUS_API = 0.8;
-  EVASION_LOGIC = 1.5;
-  CONTAINER = 6.0;
-  SCRIPT_HARD = 7.0;
-  CRITICAL = 12.0;
-  COMBO_JS_OBFUS = 1.5;
-  COMBO_HARD_OBFUS = 2.0;
-  COMBO_JS_API = 0.8;
-  COMBO_JS_EVASION = 0.7;
-  EXTERNAL_SCRIPT = 1.0;
-  CSS_EXFIL = 2.0;
-  GEO_TARGETING = 0.8;
-  ROTATION_BONUS = 1.0;
-  CLICKFIX_LURE = 1.2;
-  WASM_STAGING = 1.4;
-  BLOCKCHAIN_STAGING = 1.2;
-  CSS_CODE_EXEC = 1.5;
-  ATTACHMENT_VECTOR = 1.4;
-  CERT_SMUGGLING = 1.1;
-  IMAGE_SMUGGLING = 0.7;
-}
-~~~
-
-### Scoring Prinzip
-
-Das Modul zählt nicht einfach jede einzelne Reason hoch, sondern arbeitet mit Kategorien:
-
-- `JS_SMUGGLING`
-- `OBFUSCATION`
-- `SUSPICIOUS_API`
-- `EVASION`
-- `CONTAINER`
-- `SCRIPT_HARD`
-- `CRITICAL`
-
-Zusätzlich gibt es:
-
-- Soft Bonus Scores
-- Hard Bonus Scores
-- Combo Scores
-- Newsletter Multiplikatoren
-- Soft Only Cap
-- Final Score Cap
-
-Das verhindert Score Explosionen durch viele ähnliche Einzelindikatoren.
-
-## Beispiel Modulmatrix
-
-~~~lua
-modules {
-  appinstaller {
-    enabled = true;
-    info_only = false;
-  }
-  js_smuggling {
-    enabled = true;
-    info_only = false;
-  }
-  obfuscation {
-    enabled = true;
-    info_only = false;
-  }
-  decoded_payload {
-    enabled = true;
-    info_only = false;
-  }
-  uint8array {
-    enabled = true;
-    info_only = false;
-  }
-  external_scripts {
-    enabled = true;
-    info_only = false;
-  }
-  css_exfil {
-    enabled = true;
-    info_only = false;
-  }
-  geo_targeting {
-    enabled = true;
-    info_only = false;
-  }
-  evasion {
-    enabled = true;
-    info_only = false;
-  }
-  persistence {
-    enabled = true;
-    info_only = false;
-  }
-  domain_rotation {
-    enabled = true;
-    info_only = false;
-  }
-  clickfix {
-    enabled = true;
-    info_only = false;
-  }
-  wasm_staging {
-    enabled = true;
-    info_only = false;
-  }
-  blockchain_staging {
-    enabled = true;
-    info_only = false;
-  }
-  css_code_execution {
-    enabled = true;
-    info_only = false;
-  }
-  attachment_vectors {
-    enabled = true;
-    info_only = false;
-  }
-  certificate_smuggling {
-    enabled = true;
-    info_only = false;
-  }
-  image_smuggling_info {
-    enabled = false;
-    info_only = true;
-  }
-  push_abuse {
-    enabled = true;
-    info_only = true;
-  }
-  link_analysis {
-    enabled = false;
-    info_only = true;
-  }
-  wasm_binary_analysis {
-    enabled = false;
-    info_only = false;
-  }
-  rc4_detection {
-    enabled = false;
-    info_only = false;
-  }
-}
-~~~
-
-### Hinweise
-
-- `enabled = false` schaltet ein Modul vollständig aus.
-- `info_only = true` lässt das Modul nur Hinweise liefern, aber keine Scoring Wirkung.
-- `weight_override` kann pro Modul gesetzt werden.
-
-Beispiel:
-
-~~~lua
+```lua
 modules {
   clickfix {
     enabled = true;
     info_only = false;
     weight_override = 0.8;
   }
+
+  image_smuggling_info {
+    enabled = false;
+    info_only = true;
+  }
+
+  rc4_detection {
+    enabled = false;
+    info_only = false;
+  }
 }
-~~~
+```
 
-## Newsletter Detection
+---
 
-~~~lua
+## Newsletter-Entschärfung
+
+Legitime Newsletter und Marketing-Mails enthalten häufig JavaScript-, CSS-, Tracking- oder externe Ressourcenmuster, die isoliert wie verdächtige Signale aussehen können.
+
+Deshalb reduziert das Modul **Soft-Signale** bei erkannten Newslettern.
+
+Beispiel:
+
+```lua
 newsletter_detection {
   classify_headers = [
     "X-HEC-MailClass",
     "X-HEC-Category",
+    "X-FortiMail-Profile"
   ];
 
   classify_keywords = [
@@ -528,350 +605,285 @@ newsletter_detection {
   x_mailer_headers = ["X-Mailer"];
 
   x_mailer_patterns = [
-    { pattern = "mailchimp"; reason = "mailer_mailchimp"; },
-    { pattern = "sendgrid"; reason = "mailer_sendgrid"; },
-    { pattern = "salesforce"; reason = "mailer_sfmc"; },
+    { pattern = "mailchimp";       reason = "mailer_mailchimp"; },
+    { pattern = "sendgrid";        reason = "mailer_sendgrid"; },
+    { pattern = "salesforce";      reason = "mailer_sfmc"; },
     { pattern = "marketing cloud"; reason = "mailer_sfmc"; }
   ];
 
   html_keywords = ["view in browser"];
 }
-~~~
+```
 
-### Wirkung
+Hard-Gründe wie Container-, Script-Hard- oder Critical-Payloads werden dadurch nicht neutralisiert.
 
-Bei erkannten Newslettern werden Soft Signale reduziert. Das betrifft vor allem Marketing, Bulk und vertrauenswürdige Newsletter Domains. Hard Gründe wie echte Container, Script oder Critical Payloads bleiben davon unberührt.
+---
 
-## Domain Maps
+## Domain-Maps
 
-Optional können Maps genutzt werden:
+Optional können Rspamd-Maps verwendet werden:
 
-~~~lua
+```lua
 html_smuggling {
-  safe_script_domains_map = "/etc/rspamd/local.d/maps.d/safe_script_domains.map";
-  trusted_newsletter_domains_map = "/etc/rspamd/local.d/maps.d/trusted_newsletter_domains.map";
-  unsafe_script_domains_map = "/etc/rspamd/local.d/maps.d/unsafe_script_domains.map";
+  safe_script_domains_map =
+    "/etc/rspamd/local.d/maps.d/safe_script_domains.map";
+
+  trusted_newsletter_domains_map =
+    "/etc/rspamd/local.d/maps.d/trusted_newsletter_domains.map";
+
+  unsafe_script_domains_map =
+    "/etc/rspamd/local.d/maps.d/unsafe_script_domains.map";
 }
-~~~
+```
 
-### Zweck
+### Bedeutung
 
-- `safe_script_domains_map` erlaubt ungefährliche Script Hosts.
-- `trusted_newsletter_domains_map` reduziert Soft Scores für bekannte Newsletter Absender.
-- `unsafe_script_domains_map` überschreibt Safe Hosts bewusst nach unten.
+- `safe_script_domains_map`
+  - bekannte legitime Script-Hosts
 
-## Beispiel für eine vollständige lokale Konfiguration
+- `trusted_newsletter_domains_map`
+  - reduziert Soft-Scores für bekannte Newsletter-Domains
 
-Datei zum Beispiel unter:
+- `unsafe_script_domains_map`
+  - explizite Negativliste
+  - übersteuert einen Eintrag aus der Safe-Map
 
-`/etc/rspamd/local.d/html_smuggling.conf`
-
-~~~lua
-html_smuggling {
-  enabled = true;
-  debug = false;
-  test_mode = false;
-
-  log_score_threshold = 5.0;
-  force_extended_log = true;
-  force_extended_log_min_score = 5.0;
-  log_simple_line = true;
-  score_debug = false;
-  enable_phase_debug = false;
-  decode_debug = false;
-
-  max_final_score = 15.0;
-  soft_only_cap = 4.5;
-  critical_boost = 0.0;
-  min_score = 0.0;
-
-  require_script_context_for_external = true;
-  require_strong_gate_for_decode = true;
-  max_external_reported = 3;
-
-  heur_mul_default = 1.0;
-  heur_mul_newsletter_header = 0.3;
-  heur_mul_newsletter_heuristic = 0.4;
-  heur_mul_trusted_newsletter = 0.1;
-
-  deep_scan_newsletter_header = true;
-  redact_log_fields = true;
-  safe_task_access = true;
-  safe_part_access = true;
-  log_config_validation = true;
-  strict_weight_validation = false;
-  hard_fail_on_bad_config = false;
-
-  safe_script_domains_map = "/etc/rspamd/local.d/maps.d/safe_script_domains.map";
-  trusted_newsletter_domains_map = "/etc/rspamd/local.d/maps.d/trusted_newsletter_domains.map";
-  unsafe_script_domains_map = "/etc/rspamd/local.d/maps.d/unsafe_script_domains.map";
-
-  limits {
-    scan {
-      max_bytes = 204800;
-      smart_chunk = 51200;
-      long_html_b64_threshold = 1200;
-      max_attachment_text = 307200;
-    }
-    b64 {
-      min_len = 200;
-      max_candidates = 6;
-      max_scan_bytes = 512000;
-      min_decode_total = 400;
-      big_threshold = 5000;
-      huge_threshold = 20000;
-      join_max_parts = 5;
-      join_max_len = 180000;
-    }
-    decode {
-      max_bytes = 163840;
-      joined_len_mul = 2;
-    }
-    script {
-      max_check = 3;
-      max_external = 5;
-      max_vars = 20;
-      smart_chunk = 20000;
-      max_script_len = 80000;
-      max_total_script_scan = 120000;
-      max_script_time_ms = 80.0;
-      deobfus_timeout_ms = 50.0;
-      split_payload_min_vars = 6;
-    }
-    obfus {
-      min_frag_len = 4;
-      virtual_trigger_len = 120;
-      virtual_max_payloads = 3;
-      resolve_passes = 8;
-      max_uint8array_bytes = 2048;
-      max_entropy_check_bytes = 4096;
-      css_max_style_size = 10000;
-      max_delayed_exec_context = 500;
-    }
-  }
-
-  thresholds {
-    entropy_high = 4.5;
-    entropy_very_high = 5.0;
-    hex_var_low = 2;
-    hex_var_high = 5;
-    array_storage_low = 1;
-    array_storage_high = 3;
-    uint8array_large_min = 1024;
-    deobfus_reduce_len_1 = 20000;
-    deobfus_reduce_len_2 = 40000;
-    b64_extract_loop_budget_ms = 25.0;
-    script_min_len = 20;
-    normalized_script_min_len = 40;
-    delayed_exec_context = 500;
-  }
-
-  weights {
-    JS_SMUGGLING = 1.2;
-    OBFUSCATION = 2.5;
-    SUSPICIOUS_API = 0.8;
-    EVASION_LOGIC = 1.5;
-    CONTAINER = 6.0;
-    SCRIPT_HARD = 7.0;
-    CRITICAL = 12.0;
-    COMBO_JS_OBFUS = 1.5;
-    COMBO_HARD_OBFUS = 2.0;
-    COMBO_JS_API = 0.8;
-    COMBO_JS_EVASION = 0.7;
-    EXTERNAL_SCRIPT = 1.0;
-    CSS_EXFIL = 2.0;
-    GEO_TARGETING = 0.8;
-    ROTATION_BONUS = 1.0;
-    CLICKFIX_LURE = 1.2;
-    WASM_STAGING = 1.4;
-    BLOCKCHAIN_STAGING = 1.2;
-    CSS_CODE_EXEC = 1.5;
-    ATTACHMENT_VECTOR = 1.4;
-    CERT_SMUGGLING = 1.1;
-    IMAGE_SMUGGLING = 0.7;
-  }
-
-  modules {
-    attachment_vectors {
-      enabled = true;
-      info_only = false;
-    }
-    certificate_smuggling {
-      enabled = true;
-      info_only = false;
-    }
-    image_smuggling_info {
-      enabled = false;
-      info_only = true;
-    }
-    push_abuse {
-      enabled = true;
-      info_only = true;
-    }
-    rc4_detection {
-      enabled = false;
-      info_only = false;
-    }
-    wasm_binary_analysis {
-      enabled = false;
-      info_only = false;
-    }
-  }
-
-  newsletter_detection {
-    classify_headers = ["X-HEC-MailClass", "X-HEC-Category", "X-FortiMail-Profile"];
-    classify_keywords = ["newsletter", "marketing", "bulk"];
-    list_id_headers = ["List-Id"];
-    list_unsubscribe_headers = ["List-Unsubscribe"];
-    precedence_headers = ["Precedence", "X-Precedence"];
-    precedence_keywords = ["bulk"];
-    x_mailer_headers = ["X-Mailer"];
-    html_keywords = ["view in browser"];
-  }
-}
-~~~
+---
 
 ## Installation
 
-Die Lua Datei liegt produktiv typischerweise hier:
+### Lua-Modul
 
-`/etc/rspamd/lua.local.d/html_smuggling.lua`
+```text
+/etc/rspamd/lua.local.d/html_smuggling.lua
+```
 
-Die Konfiguration liegt typischerweise hier:
+### Konfiguration
 
-`/etc/rspamd/local.d/html_smuggling.conf`
+```text
+/etc/rspamd/local.d/html_smuggling.conf
+```
 
-Danach sollte die Konfiguration geprüft werden:
+Danach die Rspamd-Konfiguration prüfen:
 
-~~~bash
+```bash
 rspamadm configtest
-~~~
+```
 
-Anschliessend Rspamd neu laden oder neu starten:
+Anschliessend Rspamd neu laden:
 
-~~~bash
-systemctl restart rspamd
-~~~
-
-oder je nach Umgebung:
-
-~~~bash
+```bash
 systemctl reload rspamd
-~~~
+```
+
+oder neu starten:
+
+```bash
+systemctl restart rspamd
+```
+
+---
 
 ## Empfohlene Inbetriebnahme
 
-Für einen sauberen Rollout empfiehlt sich dieses Vorgehen:
+Für einen kontrollierten Rollout:
 
-1. Erst mit `test_mode = true` starten.
-2. Logging für einige Tage beobachten.
-3. False Positives gegen reale Newsletter, Marketing Mails und interne Systeme prüfen.
-4. Danach in den produktiven Modus wechseln.
-5. Gewichte und Caps nur gezielt anpassen, nicht pauschal.
+1. mit `test_mode = true` starten
+2. Logging und Scores beobachten
+3. reale Newsletter und Marketing-Mails prüfen
+4. interne HTML-Reports und legitime SVG/PDF-Mails prüfen
+5. False Positives bewerten
+6. erst danach `test_mode = false`
+7. Gewichte und Caps nur gezielt verändern
+8. optionale Module erst nach separatem Test aktivieren
 
-## Ergebnis und Symbolik
+---
 
-Das Hauptsymbol ist:
+## Hauptsymbol
 
-`HTML_SMUGGLING_PAYLOAD`
+Im Produktivmodus:
 
-Zusätzlich werden Marker und Klassen Symbole gesetzt, zum Beispiel:
+```text
+HTML_SMUGGLING_PAYLOAD
+```
 
-- `HTML_SMUGGLING_MARKER_PDF_ACTIVE`
-- `HTML_SMUGGLING_MARKER_SVG_ACTIVE`
-- `HTML_SMUGGLING_MARKER_CERT_SMUGGLING`
-- `HTML_SMUGGLING_MARKER_CLICKFIX`
-- `HTML_SMUGGLING_MARKER_WASM_STAGING`
-- `HTML_SMUGGLING_MARKER_BLOCKCHAIN_STAGING`
-- `HTML_SMUGGLING_MARKER_CSS_CODE_EXEC`
-- `HTML_SMUGGLING_MARKER_PUSH_ABUSE`
-- `HTML_SMUGGLING_CLASS_JS`
-- `HTML_SMUGGLING_CLASS_OBFUS`
-- `HTML_SMUGGLING_CLASS_CONTAINER`
-- `HTML_SMUGGLING_CLASS_SCRIPT_HARD`
-- `HTML_SMUGGLING_CLASS_CRITICAL`
+Im Testmodus:
 
-Zusätzlich existieren payloadspezifische Marker, zum Beispiel:
+```text
+HTML_SMUGGLING_TEST
+```
 
-- `HTML_SMUGGLING_CRITICAL_PE`
-- `HTML_SMUGGLING_CRITICAL_WASM`
-- `HTML_SMUGGLING_CRITICAL_APPINSTALLER`
-- `HTML_SMUGGLING_CRITICAL_ZIP`
-- `HTML_SMUGGLING_CRITICAL_ISO`
-- `HTML_SMUGGLING_CRITICAL_LNK`
-- `HTML_SMUGGLING_CRITICAL_MSIX`
-- `HTML_SMUGGLING_CRITICAL_APPX`
-- `HTML_SMUGGLING_CRITICAL_CAB`
-- `HTML_SMUGGLING_CRITICAL_7ZIP`
-- `HTML_SMUGGLING_CRITICAL_RAR`
-- `HTML_SMUGGLING_CRITICAL_CHM`
-- `HTML_SMUGGLING_CRITICAL_ONENOTE`
+---
 
-Diese Marker helfen für Logging, Policies, Reports und spätere Auswertungen.
+## Marker
 
-## Wichtige Betriebs Hinweise
+Je nach Detection werden zusätzliche Marker gesetzt.
 
-### 1. Performance
-Das Modul ist auf produktive Laufzeit optimiert. Trotzdem sollte es auf echten Mail Daten beobachtet werden, speziell bei:
+Beispiele:
 
-- grossen HTML Newslettern
-- stark obfuskierten HTML Dateien
-- vielen Attachments pro Nachricht
-- grossen Base64 Blöcken
-- vielen Script Tags oder langen Script Bodies
+```text
+HTML_SMUGGLING_MARKER_SERVICEWORKER
+HTML_SMUGGLING_MARKER_WEBCRYPTO
+HTML_SMUGGLING_MARKER_QR_CANVAS
+HTML_SMUGGLING_MARKER_SPLIT_PAYLOAD
+HTML_SMUGGLING_MARKER_HEX_ARRAY
+HTML_SMUGGLING_MARKER_SUSPICIOUS_API
+HTML_SMUGGLING_MARKER_GEO_TARGETING
+HTML_SMUGGLING_MARKER_EVASION
+HTML_SMUGGLING_MARKER_PERSISTENCE
+HTML_SMUGGLING_MARKER_DOMAIN_ROTATION
+HTML_SMUGGLING_MARKER_CLICKFIX
+HTML_SMUGGLING_MARKER_WASM_STAGING
+HTML_SMUGGLING_MARKER_BLOCKCHAIN_STAGING
+HTML_SMUGGLING_MARKER_CSS_CODE_EXEC
+HTML_SMUGGLING_MARKER_RC4_DECRYPT
+HTML_SMUGGLING_MARKER_PDF_ACTIVE
+HTML_SMUGGLING_MARKER_SVG_ACTIVE
+HTML_SMUGGLING_MARKER_CERT_SMUGGLING
+HTML_SMUGGLING_MARKER_PUSH_ABUSE
+```
 
-### 2. False Positives
-Besonders im Blick behalten:
+---
 
-- Marketing und Newsletter Systeme
-- SVG Dateien aus legitimen Design Tools
-- PDF Dokumente mit aktiven Formular oder Medien Elementen
-- technische Zertifikats Mails aus PKI oder Monitoring Umgebungen
-- legitime externe Script Einbindungen in HTML Reports
+## Klassen
 
-### 3. Zertifikats Erkennung
-Die Zertifikats Erkennung ist absichtlich konservativ. Eine legitime Zertifikats Mail kann Hinweise setzen. Entscheidend ist der Kontext mit Base64, Script, Blob, Fetch oder Data URI Missbrauch.
+```text
+HTML_SMUGGLING_CLASS_JS
+HTML_SMUGGLING_CLASS_OBFUS
+HTML_SMUGGLING_CLASS_CONTAINER
+HTML_SMUGGLING_CLASS_SCRIPT_HARD
+HTML_SMUGGLING_CLASS_CRITICAL
+```
 
-### 4. Bild Missbrauch
-Das Modul `image_smuggling_info` ist nur ein Hinweis Modul. Es liefert keine verlässliche Steganographie Erkennung.
+---
 
-### 5. Externe Scripts
-Externe Scripts werden absichtlich nicht blind hochgewichtet. Ohne passenden Script oder Smuggling Kontext sollen sie nicht unnötig auslösen.
+## Payload-spezifische Critical-Marker
 
-### 6. Decode Pfad
-Der Decode Pfad ist bewusst gehärtet:
+```text
+HTML_SMUGGLING_CRITICAL_PE
+HTML_SMUGGLING_CRITICAL_WASM
+HTML_SMUGGLING_CRITICAL_APPINSTALLER
+HTML_SMUGGLING_CRITICAL_VHDX
+HTML_SMUGGLING_CRITICAL_ISO
+HTML_SMUGGLING_CRITICAL_LNK
+HTML_SMUGGLING_CRITICAL_OLE
+HTML_SMUGGLING_CRITICAL_ZIP
+HTML_SMUGGLING_CRITICAL_SCRIPT
+HTML_SMUGGLING_CRITICAL_MSIX
+HTML_SMUGGLING_CRITICAL_APPX
+HTML_SMUGGLING_CRITICAL_CAB
+HTML_SMUGGLING_CRITICAL_7ZIP
+HTML_SMUGGLING_CRITICAL_RAR
+HTML_SMUGGLING_CRITICAL_CHM
+HTML_SMUGGLING_CRITICAL_ONENOTE
+```
 
-- Mindestlänge pro Kandidat
-- Mindestgesamtmenge an Base64 Material
-- Quality Score vor dem Decode
-- optional starker Kontext erforderlich
-- Limits für Kandidaten, Bytes und Laufzeit
+Diese Symbole eignen sich für:
 
-## Was v4.4.0 im praktischen Betrieb gut kann
+- Rspamd Policies
+- Logging
+- SIEM
+- Dashboards
+- Statistiken
+- Quarantäne-Regeln
+- Threat-Hunting-Auswertungen
 
-- frühe Erkennung moderner HTML Smuggling Muster
-- gute Abdeckung für häufige Delivery Chains
-- brauchbare Einordnung dekodierter Payloads
-- gute Sichtbarkeit auf gefährliche Attachments
-- Trennung von Soft und Hard Signalen
-- brauchbare Newsletter Entschärfung
-- gut lesbare Marker und Summary Tags
+---
 
-## Grenzen der Erkennung
+## Performance- und Sicherheitsdesign
 
-Die Version v4.4.0 erreicht in der Praxis eine breite Abdeckung. Trotzdem ersetzt sie keine Sandbox und keine tiefgehende Dateianalyse. Für hoch entwickelte Kampagnen mit echter Bild Steganographie, komplexem PDF Objekt Missbrauch oder mehrstufigem Remote Staging bleiben zusätzliche Kontrollen sinnvoll.
+Das Modul verwendet mehrere Schutzmechanismen:
 
-## Empfehlung für produktiven Betrieb
+- maximale HTML-Scan-Grösse
+- Smart-Chunks für grosse Inhalte
+- Script-Längenbegrenzung
+- Gesamtbudget für Script-Scans
+- Deobfuskations-Zeitbudget
+- Base64-Kandidatenlimit
+- Kandidaten-Priorisierung
+- rekursive Decode-Tiefenbegrenzung
+- Attachment-Magic-Limit
+- Image-Tail-Limit
+- begrenzte Anzahl externer Scripts
+- defensive `pcall`-Zugriffe auf Task-/Part-Funktionen
+- Config-Validierung
+- Score-Caps
 
-Für ein sauberes Setup im Gateway Betrieb ist diese Kombination sinnvoll:
+Dadurch bleibt der Scanner auch bei grossen oder absichtlich problematischen Nachrichten kontrollierbar.
 
-- Rspamd mit HTML Smuggling Detection als frühe Erkennung
-- URL Reputation und URL Rewrite Kontrollen
-- Attachment Policy für CHM, HTA, LNK, OneNote und Script Dateien
-- AV oder Sandbox für tiefe Dateianalyse
-- separates Monitoring für False Positives und neue Taktiken
-- kontrollierte Freischaltung von Modulen wie `image_smuggling_info`, `rc4_detection` oder `wasm_binary_analysis`
+---
+
+## False-Positive-Bereiche
+
+Besonders beobachten:
+
+- Newsletter
+- Marketing-Mails
+- HTML-Reports
+- legitime externe Scripts
+- grosse Base64-Inline-Grafiken
+- SVG-Dateien aus Design-Tools
+- PDFs mit Formularen oder RichMedia
+- Zertifikats-/PKI-Mails
+- technische Monitoring-Mails
+- legitime Office-Makrocontainer
+
+Die Bewertung sollte immer zusammen mit den gesetzten Reasons, Klassen und Markern erfolgen.
+
+---
+
+## Grenzen
+
+Das Modul ersetzt keine Sandbox und keinen vollständigen Datei-Parser.
+
+Nicht oder nur eingeschränkt umgesetzt sind:
+
+- echte Bild-Steganographie
+- vollständige PDF-Objektrekonstruktion
+- tiefes Office-/VBA-Parsing
+- vollständige PKCS-/Zertifikatsvalidierung
+- JavaScript-Ausführung in einem Browser
+- Headless-Navigation externer URLs
+- dynamische Analyse von Binärdateien
+- System-Call-/Behavior-Analyse
+- vollständige Archivrekursion
+
+`image_smuggling_info` ist daher bewusst nur ein Hinweis-Modul. Das neue Image-Tail-Carving in `attachment_vectors` erkennt angehängte Inhalte, aber keine allgemeine Steganographie.
+
+---
+
+## Empfohlener produktiver Einsatz
+
+Sinnvolle Kombination:
+
+- Rspamd HTML Smuggling Detection
+- URL-Reputation
+- DNS-/Domain-Reputation
+- Attachment-Policy
+- AV
+- Sandbox für tiefe Analyse
+- SIEM-/Logging-Anbindung
+- separates False-Positive-Monitoring
+
+Besonders riskante Dateitypen wie CHM, HTA, LNK, OneNote und Script-Dateien sollten zusätzlich durch die zentrale Mail-Policy berücksichtigt werden.
+
+---
 
 ## Kurzfazit
 
-Die v4.4.0 ist eine saubere, produktionsnahe Weiterentwicklung der früheren 4.3.x Linien. Sie bleibt wartbar, erweitert aber die Erkennung spürbar in Richtung moderner Non HTML und Attachment Vektoren. Für einen produktiven Mail Gateway Betrieb ist das ein guter, ausgewogener Stand zwischen Abdeckung, Performance und Pflegeaufwand.
+**v4.5.0** ist gegenüber v4.4.0 vor allem beim tatsächlichen Payload-Inhalt deutlich stärker.
+
+Die wichtigsten Fortschritte sind:
+
+- bessere Base64-Priorisierung
+- Magic-Prefix-Fast-Path
+- rekursives Decoding
+- erweiterte Byte-Array-Rekonstruktion
+- zusätzliche Kompressionsformate
+- Attachment-Magic-Prüfung
+- Image-Tail-Carving
+- bessere Script-Priorisierung
+
+Damit bleibt HTML der zentrale Erkennungspfad, während Attachment- und Non-HTML-Vektoren wesentlich tiefer geprüft werden. Die Laufzeit wird weiterhin durch feste Scan-, Decode- und Script-Budgets begrenzt.
+
+Das Modul ist damit gut für einen **produktionsnahen Rspamd-Mail-Gateway-Betrieb** geeignet, sofern der Rollout zuerst im Testmodus erfolgt und False Positives mit realem Mailverkehr validiert werden.
